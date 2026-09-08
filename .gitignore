@@ -9,6 +9,7 @@ skill/scripts/openrouter_models_cache.json
 # 核验产物（可再生，不入库）
 score_verification_report.json
 verify_pending.json
+backup_scores.json
 .verify_cache/
 
 # 生成的天梯榜工作簿（可再生交付物，不入库）

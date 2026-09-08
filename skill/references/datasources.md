@@ -101,6 +101,17 @@ $$\\text{综合得分} = (\\text{GPQA Diamond} \\times 0.40) + (\\text{SWE-bench
 
 排序规则：完全依据综合得分进行数学降序排列，且仅在筛选后的目标集合内排位（国内/国际/指定公司榜单各自从 1 开始）；三项分数任一缺失或无效的模型不参与综合排名，在表格中显式标注并排在完整记录之后。
 
+### 后备评分源适配器（benchmark_sources.py，兜底候选值）
+
+当声称来源无法核验（403 / JS 渲染 / 页面无值）时，从以下源拉取标准化观测作为**人工复核候选**（`--fallback` 写入注册表 fallback 字段 + pending 队列，不自动升级 ok）：
+
+| 适配器 | 数据源 | 覆盖指标 | 说明 |
+| --- | --- | --- | --- |
+| artificial_analysis | https://artificialanalysis.ai/models/\<slug\> | GPQA Diamond, MMLU-Pro | 解析 RSC 数据流的 `gpqa`/`mmmuPro` 字段（0-1 归一）；带家族页重定向守卫（如 /models/glm-5-3-flash 重定向到 /models/glm-5-3 时拒绝采用） |
+| openrouter_indices | https://openrouter.ai/api/v1/models | AA 三指数（辅助） | `benchmarks.artificial_analysis` 的 intelligence/coding/agentic index，**仅辅助信号，不可顶替三项基准** |
+
+已实测**不可用**、勿再尝试的候选（如实记录探测结论）：LMArena API（`lmarena.ai/api/*` → 403 Forbidden）；OpenCompass 司南（`rank.opencompass.org.cn` 全站 SPA，无公开 JSON 接口）；Scale AI SWE-bench Pro 的 HF space parquet（`lhoestq/ScaleAI-SWE-bench_Pro-atlas`，实为评测**任务数据集**：repo/instance_id/patch 列，不是模型成绩）；swebench.com 与 labs.scale.com/leaderboard（动态渲染、无稳定 JSON）。上述源的分数只能通过浏览器人工取证后录入。
+
 ### 聚合站取值规则（防"参考值误当自身分"，P0）
 
 benchlm / vals.ai 等聚合站的指标区块同时含两类数字，取值时**只取模型自身行**：

@@ -318,6 +318,47 @@ def write_back(model, results):
     return model
 
 
+def apply_fallback(models, without=None):
+    """从后备评分源（benchmark_sources.py）拉取观测，为未核验指标附上候选值。
+
+    后备观测只作为人工复核候选写入 registry（verification.metrics[key].fallback），
+    绝不自动升级为 ok；命中同时追加到 pending 队列（fallback_candidate）。
+    返回 (observations, 命中数, 源状态列表)。
+    """
+    try:
+        from benchmark_sources import fetch_all, names_match
+    except ImportError:
+        print("WARNING: 无法加载 benchmark_sources 适配器", file=sys.stderr)
+        return [], 0, [], []
+    names = [m["name"] for m in models]
+    obs, statuses = fetch_all(names, without=without)
+    hits = 0
+    extra_pending = []
+    for m in models:
+        vm = (m.get("verification") or {}).get("metrics") or {}
+        for key, r in vm.items():
+            if r.get("status") == "ok":
+                continue
+            cand = [o for o in obs if names_match(m["name"], o["model_display"])
+                    and o["metric"] == key]
+            if not cand:
+                continue
+            hits += 1
+            r["fallback"] = {
+                "source": cand[0]["source"], "value": cand[0]["value"],
+                "source_type": cand[0]["source_type"], "source_url": cand[0]["source_url"],
+                "fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "notes": cand[0].get("notes", ""),
+            }
+            extra_pending.append({
+                "model": m["name"], "metric": REQUIRED_METRICS.get(key, key),
+                "claimed": r.get("claimed"), "status": "fallback_candidate",
+                "source_url": cand[0]["source_url"],
+                "reason": f"后备源 {cand[0]['source']} 提供候选值 {cand[0]['value']}，请人工确认后更新 claimed 并重跑核验",
+            })
+    return obs, hits, statuses, extra_pending
+
+
 def main():
     ap = argparse.ArgumentParser(description="Benchmark 分数自动核验")
     ap.add_argument("--registry", default=DEFAULT_REGISTRY_PATH)
@@ -326,6 +367,9 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="不写回注册表")
     ap.add_argument("--report", default="score_verification_report.json")
     ap.add_argument("--pending", default="verify_pending.json")
+    ap.add_argument("--fallback", action="store_true",
+                    help="核验后从后备评分源拉取候选值（人工复核用，不自动升级 ok）")
+    ap.add_argument("--without", default=None, help="逗号分隔的后备源适配器名，跳过")
     args = ap.parse_args()
 
     registry = load_or_init_registry(args.registry)
@@ -360,6 +404,14 @@ def main():
         print(" |".join(line))
         print(f"  overall: {m.get('verification', {}).get('status')}")
 
+    fallback_hits = 0
+    if args.fallback:
+        without = set(args.without.split(",")) if args.without else set()
+        _obs, fallback_hits, src_statuses, extra_pending = apply_fallback(models, without=without)
+        pending.extend(extra_pending)
+        for st in src_statuses:
+            print(f"  [fallback:{st.get('status')}] {st.get('source')} {st.get('error', '')}")
+
     with open(args.report, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
     with open(args.pending, "w", encoding="utf-8") as f:
@@ -372,6 +424,8 @@ def main():
         modified = len(models)
 
     print(f"\nSUMMARY: {json.dumps(summary, ensure_ascii=False)}")
+    if args.fallback:
+        print(f"FALLBACK_HITS:{fallback_hits}（后备源候选值，未自动升级 ok，见 verify_pending.json）")
     print(f"REPORT:{os.path.abspath(args.report)}")
     print(f"PENDING:{os.path.abspath(args.pending)}")
     print(f"REGISTRY_UPDATED:{modified} models")

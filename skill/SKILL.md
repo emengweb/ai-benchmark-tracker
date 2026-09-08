@@ -138,6 +138,14 @@ python <skill_dir>/scripts/verify_scores.py --fresh
 ```
 
 - 输出 `score_verification_report.json`（逐模型逐指标：ok/mismatch/missing/unverifiable + 证据摘录）与 `verify_pending.json`（人工复核队列）。
+- 对核验为 unverified / missing / mismatch 的分数，可先拉取**后备评分源候选值**（不自动升级，供人工复核加速）：
+
+```bash
+python <skill_dir>/scripts/benchmark_sources.py                          # 单独拉取后备观测
+python <skill_dir>/scripts/verify_scores.py --fallback                  # 核验时同步附加后备候选值
+```
+
+- 后备源适配器（`benchmark_sources.py`）：**Artificial Analysis 模型页**（GPQA Diamond / MMLU-Pro，RSC 数据流，带家族页重定向守卫）与 **OpenRouter 目录的 AA 三指数**（辅助信号，不进三项基准）。已实测不可用的源不列入：LMArena API（403）、OpenCompass（SPA 无 JSON）、Scale AI parquet（实为任务数据集非成绩）、swebench.com / labs.scale.com（动态渲染）。
 - 对核验为 unverified / missing / mismatch 的分数，再用 `google:search` 搜官方系统卡、基准官方结果页或可复现评测，核对后通过 `--add-model` 更新注册表并重跑核验。
 - 查询词：`"<模型名>" "GPQA Diamond" "SWE-bench Verified" "MMLU-Pro" pricing`；国内模型另查 OpenCompass 司南与厂商技术博客。
 - 提取字段：GPQA Diamond %、SWE-bench Verified %、SWE-bench Pro %、MMLU-Pro %、输入/输出定价（$/M token）、发布年月、核心定位、以及**每条分数对应的来源直链**；无法核验的分数**留空或保持 ⚠ 未核验状态**（不要臆造）。
