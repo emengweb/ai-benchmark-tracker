@@ -1,13 +1,13 @@
 ---
 name: ai-benchmark-tracker
-description: Continuously track, discover, fetch, extract, analyze, and aggregate latest AI model benchmark evaluation data, and export to a structured Excel spreadsheet (.xlsx) with timestamp suffix uploaded to Google Drive. Use when the user asks to monitor, track, refresh, discover new models, or export AI model benchmarks, leaderboard rankings, or create benchmark Excel reports for domestic and global models. 自动识别用户要求的范围（国内/国产、国际/海外，或指定公司如 OpenAI、DeepSeek），运行时通过 OpenRouter 目录发现最新模型、采集可核验的 Benchmark 评分，加权计算综合得分并排名，生成带时间戳的 Excel（.xlsx）天梯榜并可上传 Google Drive。当用户要求整理、追踪、刷新最新 AI 模型跑分或评测数据，发现新发布模型，生成、更新或导出国内外大模型综合能力天梯榜、跑分排行榜、Benchmark Excel 报告时使用。
+description: Continuously track, discover, fetch, extract, analyze, and aggregate latest AI model benchmark evaluation data, and export to a structured Excel spreadsheet (.xlsx) with a timestamp suffix. Use when the user asks to monitor, track, refresh, discover new models, or export AI model benchmarks, leaderboard rankings, or create benchmark Excel reports for domestic and global models. 自动识别用户要求的范围（国内/国产、国际/海外，或指定公司如 OpenAI、DeepSeek），运行时通过 OpenRouter 目录发现最新模型、采集可核验的 Benchmark 评分，加权计算综合得分并排名，生成带时间戳的 Excel（.xlsx）天梯榜。当用户要求整理、追踪、刷新最新 AI 模型跑分或评测数据，发现新发布模型，生成、更新或导出国内外大模型综合能力天梯榜、跑分排行榜、Benchmark Excel 报告时使用。
 ---
 
-Automated pipeline for tracking, runtime discovery, and benchmark data aggregation across domestic and international AI models. Computes mathematical composite rankings, attaches deep-link traceability, and generates timestamped Excel workbooks (.xlsx) uploaded to Google Drive.
+Automated pipeline for tracking, runtime discovery, and benchmark data aggregation across domestic and international AI models. Computes mathematical composite rankings, attaches deep-link traceability, and generates timestamped Excel workbooks (.xlsx).
 
 ## 中文说明与调用范例
 
-本技能持续追踪、抓取并汇总国内外最新 AI 大模型的 Benchmark 评测数据（GPQA Diamond、SWE-bench Verified / SWE-bench Pro、MMLU-Pro、参考定价等），按固定权重（GPQA 40% + SWE-bench Verified 35% + MMLU-Pro 25%）计算加权综合得分并降序排名，最终生成带时间戳后缀的 Excel（.xlsx）天梯榜文档，可上传至 Google Drive 交付。
+本技能持续追踪、抓取并汇总国内外最新 AI 大模型的 Benchmark 评测数据（GPQA Diamond、SWE-bench Verified / SWE-bench Pro、MMLU-Pro、参考定价等），按固定权重（GPQA 40% + SWE-bench Verified 35% + MMLU-Pro 25%）计算加权综合得分并降序排名，最终生成带时间戳后缀的 Excel（.xlsx）天梯榜文档，在当前工作目录本地交付。
 
 **范围识别**：先按用户措辞解析目标范围（国内 / 国际 / 指定公司 / 全部），再执行“运行时发现模型 → 采集评分证据 → 按范围导出”。模型清单是变化的：默认发现最新/热门模型（OpenRouter 月榜前 20 左右），用户指定地域或公司时只发现并汇总该范围的模型。
 
@@ -17,7 +17,7 @@ Automated pipeline for tracking, runtime discovery, and benchmark data aggregati
 - “刷新一下国内外主流大模型的跑分数据，生成新的 Excel 报告” → 全部
 - “整理 OpenAI 公司的 AI 模型评分，汇总成 xlsx” → 仅 OpenAI
 - “看看最近有哪些新模型发布，把它们的评测分数合并进榜单”
-- “更新模型天梯榜并上传到 Google Drive”
+- “更新模型天梯榜”
 
 ## 环境依赖与安装（Environment Setup — 换设备必读）
 
@@ -72,7 +72,7 @@ Automated pipeline for tracking, runtime discovery, and benchmark data aggregati
 
 - Tracking or refreshing latest benchmark evaluation data for mainstream domestic or international AI models, or for models of a specific company.
 - Dynamically discovering newly released models and retrieving their benchmark scores at runtime (default: latest/hot models, e.g. OpenRouter monthly top ~20).
-- Generating, updating, or exporting structured benchmark Excel reports (.xlsx) with Google Drive shareable links.
+- Generating, updating, or exporting structured benchmark Excel reports (.xlsx) with deep-link source traceability.
 - Enforcing strict column order ("评分来源" immediately following "加权综合得分"), plus granular deep-link footnote traceability with subscript hyperlinks.
 
 ## Target Models (Phase 1 Baseline)
@@ -250,10 +250,8 @@ python <skill_dir>/scripts/export_benchmark_excel.py --data-mode fresh
 Formula:
 Composite Score = (GPQA Diamond × 0.40) + (SWE-bench Verified × 0.35) + (MMLU-Pro × 0.25)
 
-### Stage D: Upload to Google Drive & Deliver (optional)
+### Stage D: Deliver（本地交付）
 
-本地生成并核验通过后，调用 `drive:create_file` 上传：
-- Set `title` to the timestamped filename (e.g. `2026国内主流AI模型综合能力与跑分天梯榜_20260908_092612.xlsx`).
-- Set `mime_type` to `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`.
-- Pass `base64_content` using the `file://` URI referencing the generated file.
-- Deliver the Google Drive clickable link (`viewUrl`) to the user. If the environment cannot upload, deliver the local path as-is and say so.
+导出脚本完成后从 stdout 取 `OUTPUT_PATH:<文件路径>`，将该本地路径作为交付结果告知用户：
+- 文件生成在当前工作目录（除非显式指定 `--output`），文件名自带时间戳后缀；
+- 如用户明确要求上传到网盘/其他位置，如实告知本技能只负责本地生成交付，不内置上传能力。
