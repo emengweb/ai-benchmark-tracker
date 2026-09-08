@@ -138,6 +138,28 @@ The Excel sheet columns MUST strictly follow this exact order:
 - 同一指标在同页存在多个标签化观察值时全部记录（`alt_values`），供人工复核；分数必须有可核验来源并记录来源 URL 与核验时间，网络/动态页面不可获取时如实报告并标记 unverified，绝不编造数据。
 - 注册表出现基线字段被覆盖、同名异写重复（GLM 5.3 vs GLM-5.3）、属性列被写成目录标签等历史退化时，运行 `python <skill_dir>/scripts/registry_maintenance.py`（预演）→ `--apply`（写回，自动备份）修复。
 
+## 本地永久存储（缓存）与更新方法
+
+本技能把发现过的模型信息与评分**永久存储在本地**（不是会过期的临时缓存），避免重复查询、加快报告生成：
+
+- 存储位置（技能 scripts 目录内）：
+  - `models_registry.json`：模型清单 + 评分 + 核验状态 + **每项评分的来源 URL**（verification / fallback 字段）；
+  - `openrouter_models_cache.json`：OpenRouter 目录快照；`openrouter_rankings_hint.json`：月榜热度顺序快照。
+- 工作方式：每次运行 `discover_models.py` 联网获取**一次**目录（一次调用），与本地永久存储对比去重——本地已有的模型**不再获取任何数据**，只有 `is_new=true`（本地没有）的新模型才入库、整理、取评分；评分采集完成后再永久写回本地。报告本身从本地注册表生成，速度快、结果稳定。
+- 配置文件 `<skill_dir>/config.json`（随技能分发，默认开启）：
+
+```json
+{ "cache": { "enabled": true } }
+```
+
+  改为 `false` 后忽略本地存储：每次全部候选视为新增并重新取评分（也可单次加 `--no-cache`）。
+- **告知义务**：默认流程生成报告时，必须在回复中告知用户"本次数据来自本地永久存储（缓存）"并附更新方法；报告副标题会自动标注数据模式（`--data-mode cache` 默认 / `--data-mode fresh` 本次已刷新）。
+- 更新/跳过缓存的提示语范例（用户说法 → 执行方式）：
+  - 「更新最新AI模型评分」/「刷新全部评分」→ `discover_models.py --scope all`（目录对比，只处理新增）+ `verify_scores.py --fresh --fallback`（全量重验）+ 导出 `--data-mode fresh`；
+  - 「刷新 OpenAI 最新模型/评分」→ `discover_models.py --company openai` + `verify_scores.py --company openai --fresh --fallback` + 导出 `--company openai --data-mode fresh`；
+  - 「重新核验 Kimi K3 的评分」→ `verify_scores.py --model "Kimi K3" --fresh --fallback`；
+  - 「关闭缓存」→ 编辑 `config.json` 把 `cache.enabled` 改为 `false`（永久生效），或单次命令加 `--no-cache`。
+
 ## Dynamic Runtime Model Discovery Workflow
 
 ### Stage A: 运行时发现模型（目录 API，非静态清单）
@@ -158,20 +180,24 @@ python <skill_dir>/scripts/discover_models.py --company openai --limit 20
 
 - `<skill_dir>` is this skill's installed directory (e.g. `~/.zcode/skills/ai-benchmark-tracker`); resolve the actual path at runtime.
 - Use `python` on Windows, `python3` on Linux/macOS — check availability if the first attempt fails.
-- 输出为 JSON（`summary` + `models`），每条记录含：name、institution、region、multimodal、release_date、price_input/output（$/1M）、source_url（OpenRouter 模型页）、discovered_via（来源/获取时间）。**不含伪造分数**。
-- 网络失败自动回退本地缓存 `openrouter_models_cache.json` 并标注 stale；无缓存则报错退出。
+- 输出为 JSON（`summary` + `models`），每条记录含：name、institution、region、multimodal、release_date、price_input/output（$/1M）、source_url（OpenRouter 模型页）、discovered_via（来源/获取时间）、`is_new`（本地永久存储中没有=需要入库/取评分）。**不含伪造分数**。
+- 目录每次联网获取一次并与本地永久存储去重；`summary.new_models` 列出新增模型名。**只对新增模型执行入库与取评分，本地已有的直接复用注册表数据。**
+- 网络失败自动回退本地快照 `openrouter_models_cache.json` 并标注 stale；快照也没有则报错退出。
 
 ### Stage B: 自动核验分数（首选）与人工补证
 
 对 Stage A/C 汇总的分数，先运行自动核验脚本：
 
 ```bash
-# 核验注册表全部模型并把结果写回 models_registry.json（verification 字段）
-python <skill_dir>/scripts/verify_scores.py
+# 默认：只核验"没有核验记录的新模型"；已有核验记录的复用本地永久存储结果（含来源URL）
+python <skill_dir>/scripts/verify_scores.py --fallback
 
-# 只核验指定模型 / 忽略页面缓存强制重抓
-python <skill_dir>/scripts/verify_scores.py --model "Kimi K3"
-python <skill_dir>/scripts/verify_scores.py --fresh
+# 只核验指定模型 / 指定公司（显式指定时忽略缓存强制核验）
+python <skill_dir>/scripts/verify_scores.py --model "Kimi K3" --fallback
+python <skill_dir>/scripts/verify_scores.py --company openai --fresh --fallback
+
+# 忽略本地永久存储与页面缓存，全部重新核验（用户明确要求更新评分时）
+python <skill_dir>/scripts/verify_scores.py --fresh --fallback
 ```
 
 - 输出 `score_verification_report.json`（逐模型逐指标：ok/mismatch/missing/unverifiable + 证据摘录）与 `verify_pending.json`（人工复核队列）。
@@ -208,12 +234,16 @@ python <skill_dir>/scripts/export_benchmark_excel.py --scope domestic --company 
 
 # 全部（默认，兼容旧行为）
 python <skill_dir>/scripts/export_benchmark_excel.py
+
+# 数据模式标注（写入副标题告知用户）：cache=本地永久存储（默认）/ fresh=本次已联网刷新重验
+python <skill_dir>/scripts/export_benchmark_excel.py --data-mode fresh
 ```
 
 - 导出器按机构地域自动归类（规则表 `model_taxonomy.py`）；筛选结果为 0 时脚本报错退出，不产出全量文件。
-- 排名只在筛选后的集合内计算并从 1 开始；**只有三项分数全部核验通过（ok）的模型参与排名**，其余模型展示 `—`/`数值⚠` 并标注原因，不占排名。
+- 排名只在筛选后的集合内计算并从 1 开始；三项均有可用值（核验 ok / 未核验声称值 / 后备源候选值）的模型参与排名，未核验项标 `数值⚠`；仅核验冲突与完全无数值不占排名（详见"数据完整性与诚实性规则"）。
+- 完全无分数的新发现模型进入第 4 张工作表「新发现待核验」，不挤占主榜。
 - 文件名/表格标题/副标题/底部溯源索引全部随范围联动（例如国内榜：`2026国内主流AI模型综合能力与跑分天梯榜_<YYYYMMDD_HHMMSS>.xlsx`）。
-- 建议流程顺序：`discover_models.py`（发现）→ `--add-model`（补录）→ `verify_scores.py`（核验写回）→ 导出。
+- 建议流程顺序：`discover_models.py`（目录对比，只处理新增）→ 新模型 `--add-model`（补录）→ `verify_scores.py --fallback`（默认只验新模型）→ 导出（默认 `--data-mode cache`；刷新过则 `--data-mode fresh`）。
 
 Formula:
 Composite Score = (GPQA Diamond × 0.40) + (SWE-bench Verified × 0.35) + (MMLU-Pro × 0.25)

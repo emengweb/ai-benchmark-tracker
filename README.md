@@ -19,19 +19,22 @@ ai-benchmark-tracker/
 ├── README.md                            # 本文档
 └── skill/                               # skill 本体（安装时复制此目录）
     ├── SKILL.md                         # skill 定义（frontmatter + 执行指令，含范围识别规则）
+    ├── config.json                      # 技能配置（cache.enabled 默认 true；可关闭缓存）
     ├── references/
     │   └── datasources.md               # 权威数据源与指标提取规范
     └── scripts/
+        ├── skill_config.py              # 配置读取（config.json 缺失/损坏时回退默认值）
         ├── model_taxonomy.py            # 机构 -> 公司/地域 分类规则（中英文别名，单一事实来源）
-        ├── discover_models.py           # 运行时发现脚本（OpenRouter 目录 + 月榜热度启发 + 缓存降级）
+        ├── discover_models.py           # 运行时发现脚本（目录对比去重 + 月榜热度启发 + 快照降级）
         ├── benchmark_sources.py         # 后备评分源适配器（AA 模型页 GPQA/MMLU-Pro + OpenRouter AA 指数）
         ├── render_sources.py            # 渲染型后备源（Playwright 渲染 swebench/司南/SEAL 后解析表格）
         ├── render_page.cjs              # Node 渲染回退脚本（无 Python playwright 时用全局 Node playwright）
-        ├── verify_scores.py             # 分数自动核验（抓取来源页 -> 结构化提取 -> 三元组比对 -> 写回）
+        ├── verify_scores.py             # 分数自动核验（默认只验新模型；--fresh 全量重验）
+        ├── registry_maintenance.py      # 注册表维护（基线回填/同实体归并/属性重生成，先备份）
         └── export_benchmark_excel.py    # 合并模型、按范围/公司筛选、核验感知排名、导出 xlsx
 ```
 
-> 运行时生成文件（无需手动维护，均已 gitignore）：`skill/scripts/models_registry.json`（模型注册表，首次运行按内置基线初始化，随 `--add-model` 累积并携带 verification 核验字段）、`skill/scripts/openrouter_models_cache.json`（发现脚本快照）、工作目录下 `score_verification_report.json` / `verify_pending.json` / `.verify_cache/`（核验报告、人工复核队列、页面缓存）。
+> 运行时生成文件（无需手动维护，均已 gitignore）：`skill/scripts/models_registry.json`（模型注册表，首次运行按内置基线初始化，随 `--add-model` 累积并携带 verification 核验字段）、`skill/scripts/openrouter_models_cache.json`（目录快照）、`skill/scripts/openrouter_rankings_hint.json`（月榜热度快照）、工作目录下 `score_verification_report.json` / `verify_pending.json` / `.verify_cache/`（核验报告、人工复核队列、页面缓存）。`config.json` 随技能分发与安装，用户可直接编辑。
 
 ## 调用方法
 
@@ -66,15 +69,19 @@ Agent 会按 SKILL.md 中的流程执行：解析范围 → 运行时发现模�
 
 ```bash
 # 1) 运行时发现模型（输出 JSON：summary + models；--company 可与 --scope 叠加）
+#    每次联网获取一次目录，与本地永久存储对比去重：is_new=true 的才是新模型，
+#    只对新增入库/取评分；本地已有的直接复用注册表数据（summary.new_models 列出新增）
 python skill/scripts/discover_models.py --scope domestic --limit 20
 python skill/scripts/discover_models.py --scope domestic --use-rankings --limit 20   # 月榜热度排序（尽力而为）
 python skill/scripts/discover_models.py --company openai --limit 20                  # 公司过滤
+python skill/scripts/discover_models.py --no-cache                                   # 单次忽略本地存储（全部视为新增）
 
-# 2) 自动核验分数（写回注册表 verification 字段；导出前建议先跑）
-python skill/scripts/verify_scores.py
-python skill/scripts/verify_scores.py --model "Kimi K3"        # 只核验指定模型
-python skill/scripts/verify_scores.py --fresh                  # 忽略页面缓存重新抓取
-python skill/scripts/verify_scores.py --fallback               # 同时拉取后备源候选值（人工复核用）
+# 2) 自动核验分数（写回注册表 verification 字段，含每项评分的来源 URL；导出前建议先跑）
+#    默认只核验"没有核验记录的新模型"；已有核验记录的复用本地永久存储结果
+python skill/scripts/verify_scores.py --fallback
+python skill/scripts/verify_scores.py --model "Kimi K3"        # 只核验指定模型（显式指定时强制核验）
+python skill/scripts/verify_scores.py --company openai --fresh --fallback   # 定向刷新某公司评分
+python skill/scripts/verify_scores.py --fresh --fallback       # 全量重验（用户明确要求更新评分时）
 python skill/scripts/benchmark_sources.py                      # 单独拉取后备源观测（backup_scores.json）
 python skill/scripts/render_sources.py --sources swebench,opencompass   # 渲染型后备源（render_scores.json）
 
@@ -84,6 +91,8 @@ python skill/scripts/export_benchmark_excel.py --scope international            
 python skill/scripts/export_benchmark_excel.py --company openai                      # 仅 OpenAI
 python skill/scripts/export_benchmark_excel.py --scope domestic --company 智谱      # 国内 + 指定公司
 python skill/scripts/export_benchmark_excel.py                                       # 全部（默认）
+python skill/scripts/export_benchmark_excel.py --scope all --data-mode fresh         # 标注"本次已联网刷新"
+#    --data-mode cache（默认）在副标题标注"本地永久存储"，fresh 标注"已联网刷新重验"
 
 # 4) 补录新模型并重算排名（region 可省略，按机构自动归类；分数未采集到可省略对应字段）
 python skill/scripts/export_benchmark_excel.py --add-model '{"name": "模型名", "institution": "机构", "attribute": "属性", "multimodal": true, "release_date": "2026-09", "gpqa": 90.0, "swe_verified": 85.0, "swe_pro": 60.0, "mmlu_pro": 88.0, "price_input": 1.0, "price_output": 3.0, "notes": "核心特性", "source_url": "https://评测页直链"}'
@@ -101,6 +110,43 @@ python skill/scripts/export_benchmark_excel.py --scope domestic --output /path/t
 - 核验/后备源全链路 ≤6 线程并发 + 每请求超时 + 页面缓存（24h TTL），全量核验通常 2 分钟内；
 - 若注册表出现基线字段被覆盖、同名异写重复等历史退化，运行 `python skill/scripts/registry_maintenance.py` 预演、加 `--apply` 写回（自动备份到 `.zcode/backups/`）；
 - 筛选结果为空时脚本报错退出（exit 2），不会静默导出全量文件。
+
+## 本地永久存储（缓存）
+
+本技能把发现过的模型信息与评分**永久存储在本地**（不是会过期的临时缓存），避免重复查询、加快报告生成：
+
+| 存储 | 位置（技能 scripts 目录） | 内容 |
+|------|--------------------------|------|
+| 模型注册表 | `models_registry.json` | 模型清单 + 评分 + 核验状态 + **每项评分的来源 URL** |
+| 目录快照 | `openrouter_models_cache.json` | OpenRouter 目录（联网成功后覆盖保存） |
+| 热度快照 | `openrouter_rankings_hint.json` | 月榜热度顺序（`--use-rankings` 时更新） |
+
+工作方式：
+
+1. 每次运行 `discover_models.py` **联网获取一次** OpenRouter 目录（一次调用，网络失败回退本地快照）；
+2. 与本地永久存储对比去重：本地已有的模型**不再获取任何数据**，输出中 `is_new=true` 的才是本地没有的新模型；
+3. **只对新增模型**入库（`--add-model`）、整理、取评分（`verify_scores.py` 默认只核验没有核验记录的模型）；完成后永久写回本地；
+4. 报告从本地注册表生成，速度快、结果稳定；副标题自动标注数据模式（`--data-mode cache` 本地存储 / `--data-mode fresh` 本次已联网刷新）。
+
+配置文件 `skill/config.json`（随技能分发）：
+
+```json
+{ "cache": { "enabled": true } }
+```
+
+- 默认开启缓存；改为 `false` 后忽略本地存储，每次全部候选视为新增并重新取评分；
+- 单次忽略本地存储：`discover_models.py --no-cache`；单次全量重验评分：`verify_scores.py --fresh --fallback`。
+
+更新提示语范例（怎么问 → 怎么执行）：
+
+| 用户提示语 | 执行方式 |
+|-----------|---------|
+| 「更新最新AI模型评分」/「刷新全部评分」 | `discover_models.py --scope all`（只处理新增）→ `verify_scores.py --fresh --fallback` → 导出 `--data-mode fresh` |
+| 「刷新 OpenAI 最新模型/评分」 | `discover_models.py --company openai` → `verify_scores.py --company openai --fresh --fallback` → 导出 `--company openai --data-mode fresh` |
+| 「重新核验 Kimi K3 的评分」 | `verify_scores.py --model "Kimi K3" --fresh --fallback` |
+| 「关闭缓存」 | 编辑 `config.json` 把 `cache.enabled` 改为 `false`（永久），或单次加 `--no-cache` |
+
+默认流程下，Agent 生成报告时**必须告知**用户本次数据来自本地永久存储（缓存）及上述更新方法；报告副标题中也会自动标注。
 
 ## 安装方法
 

@@ -638,7 +638,14 @@ def short_org(institution):
     return re.sub(r"\s*\([A-Za-z0-9 .&/+-]+\)\s*$", "", str(institution or "")).strip()
 
 
-def generate_excel(models_data=None, output_path=None, scope="all", company=None):
+DATA_MODE_NOTES = {
+    "cache": "数据模式：本地永久存储（含评分来源；提示语『更新最新AI模型评分』可联网刷新）",
+    "fresh": "数据模式：本次已联网刷新目录并重新核验评分",
+}
+
+
+def generate_excel(models_data=None, output_path=None, scope="all", company=None,
+                   data_mode="cache"):
     if models_data is None:
         models_data = load_or_init_registry()
 
@@ -742,7 +749,8 @@ def generate_excel(models_data=None, output_path=None, scope="all", company=None
         incomplete_note = " | " + "；".join(parts)
     ws1["A2"] = (
         f"跟踪范围：{scope_label} | 生成时间：{now.strftime('%Y-%m-%d %H:%M:%S')}"
-        f"{incomplete_note} | 评分来源列放置于得分列后，仅数字带直链"
+        f"{incomplete_note} | {DATA_MODE_NOTES.get(data_mode, DATA_MODE_NOTES['cache'])}"
+        f" | 评分来源列放置于得分列后，仅数字带直链"
     )
     ws1["A2"].font = font_subtitle
     ws1["A2"].alignment = Alignment(horizontal="left", vertical="center")
@@ -1045,6 +1053,7 @@ def generate_excel(models_data=None, output_path=None, scope="all", company=None
     print(f"OUTPUT_PATH:{output_path}")
     print(f"MODELS_INCLUDED:{len(ordered)} (ranked={len(ranked)}, partial={len(partial)}, "
           f"pending_sheet={len(scoreless)})")
+    print(f"DATA_MODE:{data_mode}")
     return output_path
 
 
@@ -1057,6 +1066,8 @@ if __name__ == "__main__":
                         help="地域范围：all=国内外全部（默认）/ domestic=仅国内 / international=仅国际")
     parser.add_argument("--company", type=str, default=None,
                         help="公司/机构过滤，如 openai / deepseek / 智谱；与 --scope 可叠加")
+    parser.add_argument("--data-mode", choices=["cache", "fresh"], default="cache",
+                        help="数据模式标注：cache=本地永久存储（默认）/ fresh=本次已联网刷新重验；写入副标题告知用户")
     args = parser.parse_args()
 
     if args.add_model:
@@ -1068,7 +1079,8 @@ if __name__ == "__main__":
             print(f"Error parsing model JSON: {e}", file=sys.stderr)
 
     try:
-        generate_excel(output_path=args.output, scope=args.scope, company=args.company)
+        generate_excel(output_path=args.output, scope=args.scope, company=args.company,
+                       data_mode=args.data_mode)
     except ValueError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(2)

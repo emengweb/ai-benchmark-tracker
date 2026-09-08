@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 
 from discover_models import http_get
 from export_benchmark_excel import DEFAULT_REGISTRY_PATH, load_or_init_registry, REQUIRED_METRICS
+from skill_config import cache_enabled
 
 CACHE_DIR = os.path.join(os.getcwd(), ".verify_cache")
 MAX_WORKERS = 6  # 并发上限（模型级并行），避免外部源限流时整体退化成串行慢速
@@ -321,11 +322,12 @@ def write_back(model, results):
     return model
 
 
-def apply_fallback(models, without=None):
+def apply_fallback(models, without=None, fresh=False):
     """从后备评分源（benchmark_sources.py）拉取观测，为未核验指标附上候选值。
 
     后备观测只作为人工复核候选写入 registry（verification.metrics[key].fallback），
     绝不自动升级为 ok；命中同时追加到 pending 队列（fallback_candidate）。
+    fresh=True 时绕过页缓存强制抓取（用户明确要求最新评分）。
     返回 (observations, 命中数, 源状态列表)。
     """
     names = [m["name"] for m in models]
@@ -335,7 +337,7 @@ def apply_fallback(models, without=None):
         fetch_bs, names_match = None, None
     obs, statuses, hits, extra_pending = [], [], 0, []
     if fetch_bs:
-        bs_obs, bs_statuses = fetch_bs(names, without=without)
+        bs_obs, bs_statuses = fetch_bs(names, without=without, fresh=fresh)
         obs.extend(bs_obs)
         statuses.extend(bs_statuses)
     try:
@@ -377,8 +379,10 @@ def apply_fallback(models, without=None):
 def main():
     ap = argparse.ArgumentParser(description="Benchmark 分数自动核验")
     ap.add_argument("--registry", default=DEFAULT_REGISTRY_PATH)
-    ap.add_argument("--model", default=None, help="只核验指定模型名称")
-    ap.add_argument("--fresh", action="store_true", help="忽略缓存重新抓取")
+    ap.add_argument("--model", default=None, help="只核验指定模型名称（显式指定时忽略缓存强制核验）")
+    ap.add_argument("--company", default=None,
+                    help="只核验指定公司/机构的模型（如 openai / deepseek / 智谱）")
+    ap.add_argument("--fresh", action="store_true", help="忽略本地永久存储与页面缓存，全部重新核验")
     ap.add_argument("--dry-run", action="store_true", help="不写回注册表")
     ap.add_argument("--report", default="score_verification_report.json")
     ap.add_argument("--pending", default="verify_pending.json")
@@ -390,16 +394,49 @@ def main():
     args = ap.parse_args()
 
     registry = load_or_init_registry(args.registry)
-    models = [m for m in registry if not args.model or m["name"] == args.model]
-    if not models:
-        print(f"ERROR: 未找到模型 {args.model}", file=sys.stderr)
-        sys.exit(2)
-    workers = max(1, min(args.workers, MAX_WORKERS, len(models)))
+    all_models = list(registry)
+    if args.company:
+        from model_taxonomy import company_aliases, resolve_company_key
+        key, _display = resolve_company_key(args.company)
+        aliases = company_aliases(key) if key else []
+        raw = str(args.company).strip().lower()
+        all_models = [
+            m for m in all_models
+            if (aliases and any(a in str(m.get("institution", "")).lower() for a in aliases))
+            or raw in str(m.get("institution", "")).lower()
+        ]
+        if not all_models:
+            print(f"ERROR: 未找到公司/机构 {args.company} 对应的模型", file=sys.stderr)
+            sys.exit(2)
 
-    summary = {"ok": 0, "mismatch": 0, "missing": 0, "unverifiable": 0}
+    # 默认（缓存开启）：已有核验记录的模型直接复用本地永久存储结果，零联网；
+    # 只对"没有核验记录的新模型"进行核验取分。--fresh / 显式 --model 时强制重验。
+    use_cache = cache_enabled() and not args.fresh
+    models, cached_skipped = [], []
+    for m in all_models:
+        has_stored = bool(((m.get("verification") or {}).get("metrics") or {}))
+        if use_cache and has_stored and not args.model:
+            cached_skipped.append(m)
+        else:
+            models.append(m)
+
+    if cached_skipped:
+        print(f"[cache] {len(cached_skipped)} 个模型复用本地永久存储的核验结果"
+              f"（含评分与来源URL）；需要更新评分时加 --fresh 或提示语『更新最新AI模型评分』")
+    if not models:
+        print("[cache] 全部模型均为缓存核验状态，本次零联网。")
+
+    summary = {"ok": 0, "mismatch": 0, "missing": 0, "unverifiable": 0, "cached": len(cached_skipped)}
     report = {"checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "models": {}}
+    for m in cached_skipped:
+        vm = (m.get("verification") or {}).get("metrics") or {}
+        report["models"][m["name"]] = {k: {**v, "cached": True} for k, v in vm.items()}
     pending = []
     t0 = time.time()
+    if models:
+        workers = max(1, min(args.workers, MAX_WORKERS, len(models)))
+    else:
+        workers = 1
 
     def _verify_one(m):
         """线程内完成抓取+判定+写回（各模型字典相互独立）；返回缓冲的输出行。"""
@@ -444,11 +481,14 @@ def main():
 
     fallback_hits = 0
     if args.fallback:
-        without = set(args.without.split(",")) if args.without else set()
-        _obs, fallback_hits, src_statuses, extra_pending = apply_fallback(models, without=without)
-        pending.extend(extra_pending)
-        for st in src_statuses:
-            print(f"  [fallback:{st.get('status')}] {st.get('source')} {st.get('error', '')}")
+        if not models:
+            print("[cache] 全部模型复用本地核验结果，跳过后备源拉取（--fresh 强制重新核验+取后备值）。")
+        else:
+            without = set(args.without.split(",")) if args.without else set()
+            _obs, fallback_hits, src_statuses, extra_pending = apply_fallback(models, without=without, fresh=args.fresh)
+            pending.extend(extra_pending)
+            for st in src_statuses:
+                print(f"  [fallback:{st.get('status')}] {st.get('source')} {st.get('error', '')}")
     print(f"总耗时（含后备源）: {time.time() - t0:.1f}s")
 
     with open(args.report, "w", encoding="utf-8") as f:

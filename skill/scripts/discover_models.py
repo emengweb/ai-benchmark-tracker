@@ -13,8 +13,11 @@
 - 本适配器只发现模型元数据（机构/特性/定价/链接）。GPQA Diamond、SWE-bench Verified、
   MMLU-Pro 等分数不会从此接口获得，输出记录中故意不包含分数 -> 导出器会将其标记为
   “数据不完整，未参与综合排名”，等待人工/Agent 从可核验来源补录。
-- 网络失败时回退到本地缓存（openrouter_models_cache.json），并在 provenance 中标注
-  stale=True；缓存也没有则报错退出，不编造任何模型。
+- 本地永久存储去重：每次运行联网获取一次目录，与本地快照/注册表对比，本地已有的
+  模型不再获取任何数据，仅对 is_new=true 的新模型入库、整理、取评分；评分采集完成
+  后同样永久存入本地（注册表含评分来源 URL）。
+- 网络失败时回退到本地快照（openrouter_models_cache.json），并在 provenance 中标注
+  stale=True；快照也没有则报错退出，不编造任何模型。
 """
 import argparse
 import json
@@ -33,10 +36,13 @@ from model_taxonomy import (
     company_aliases,
     institution_display,
 )
+from skill_config import cache_enabled, load_config
+from export_benchmark_excel import canonical_model_key
 
 OPENROUTER_MODELS_API = "https://openrouter.ai/api/v1/models"
 OPENROUTER_RANKINGS_URL = "https://openrouter.ai/rankings?view=month"
 CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "openrouter_models_cache.json")
+RANKINGS_HINT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "openrouter_rankings_hint.json")
 DEFAULT_LIMIT = 20
 USER_AGENT = "ai-benchmark-tracker/1.0 (local skill adapter)"
 
@@ -86,9 +92,42 @@ def save_cache(cache):
         print(f"WARNING: 缓存写入失败: {e}", file=sys.stderr)
 
 
+def _snapshot_ids():
+    """本地目录快照中已见过的 base model_id 集合（判断"新模型"的依据之一）。"""
+    cache = load_cache()
+    ids = set()
+    for e in (cache or {}).get("data") or []:
+        mid = (e.get("id") or "").split(":")[0]
+        if mid:
+            ids.add(mid.lower())
+    return ids
+
+
+def _registry_name_keys():
+    """注册表已收录模型的规范名集合（基线模型没有 OpenRouter id，按名称判定）。"""
+    keys = set()
+    try:
+        from export_benchmark_excel import DEFAULT_REGISTRY_PATH, canonical_model_key, load_or_init_registry
+        for m in load_or_init_registry(DEFAULT_REGISTRY_PATH):
+            ck = canonical_model_key(m.get("name"))
+            if ck:
+                keys.add(ck)
+    except Exception as e:
+        print(f"WARNING: 读取注册表失败，新模型判定仅按目录快照 id: {e}", file=sys.stderr)
+    return keys
+
+
 def fetch_catalog():
-    """返回 (models_payload_list, provenance, fatal_error)。"""
+    """每次运行联网获取一次 OpenRouter 目录（仅此一次调用）。
+
+    返回 (models_payload_list, provenance, fatal_error, new_ids)：
+    - 成功：与本地快照对比得到 new_ids（本地没有的 base model_id），快照覆盖保存；
+      后续"入库/整理/取评分"只针对本地没有的项目；
+    - 失败：回退本地永久存储快照（stale=True），离线也能出报告。
+    """
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    prev_ids = _snapshot_ids()
+
     payload, err = http_get(OPENROUTER_MODELS_API)
     if payload:
         try:
@@ -96,6 +135,10 @@ def fetch_catalog():
         except ValueError as e:
             err = f"响应解析失败: {e}"
         else:
+            new_ids = sorted({
+                (e.get("id") or "").split(":")[0].lower()
+                for e in data if e.get("id")
+            } - prev_ids)
             cache = {
                 "fetched_at": now_iso,
                 "source": OPENROUTER_MODELS_API,
@@ -104,41 +147,63 @@ def fetch_catalog():
                 "data": data,
             }
             save_cache(cache)
-            return data, {"fetched_at": now_iso, "stale": False, "cache_hit": False, "error": None}, None
+            return data, {"fetched_at": now_iso, "stale": False, "cache_hit": False,
+                          "error": None}, None, new_ids
 
-    # 网络失败 -> 缓存兜底
+    # 网络失败 -> 本地永久存储快照兜底
     cache = load_cache()
     if cache and isinstance(cache.get("data"), list):
-        print(f"WARNING: OpenRouter 获取失败（{err}），使用缓存（{cache.get('fetched_at')}）", file=sys.stderr)
+        print(f"WARNING: OpenRouter 获取失败（{err}），使用本地永久存储快照（{cache.get('fetched_at')}）", file=sys.stderr)
         return cache["data"], {
             "fetched_at": cache.get("fetched_at", "unknown"),
             "stale": True,
             "cache_hit": True,
             "error": err,
-        }, None
+        }, None, []
 
     return None, {"fetched_at": now_iso, "stale": True, "cache_hit": False, "error": err}, (
-        f"无法获取 OpenRouter 模型目录且无可用缓存: {err}"
-    )
+        f"无法获取 OpenRouter 模型目录且本地无永久存储快照: {err}"
+    ), []
 
 
 def fetch_rankings_hint():
-    """尽力而为：按月榜页面提取 'provider/model' 引用（首次出现顺序）。失败返回 None。"""
+    """尽力而为：按月榜页面提取 'provider/model' 引用（首次出现顺序）作热度排序。
+
+    网络优先；成功后永久存至 openrouter_rankings_hint.json；失败时回退本地快照，
+    保证弱网环境下热度排序仍可用。均失败返回 None。
+    """
     payload, err = http_get(OPENROUTER_RANKINGS_URL, timeout=25, retries=1)
-    if not payload:
-        return None, f"rankings 页面获取失败: {err}"
-    seen = []
-    seen_set = set()
-    for m in re.finditer(r'href="/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)"', payload):
-        variant = m.group(2)
-        if ":" in variant or "?" in variant or "=" in variant:
-            continue
-        ref = f"{m.group(1).lower()}/{variant.lower()}"
-        if ref in seen_set:
-            continue
-        seen_set.add(ref)
-        seen.append(ref)
-    return (seen, None) if seen else (None, "rankings 页面未提取到模型引用")
+    if payload:
+        seen = []
+        seen_set = set()
+        for m in re.finditer(r'href="/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)"', payload):
+            variant = m.group(2)
+            if ":" in variant or "?" in variant or "=" in variant:
+                continue
+            ref = f"{m.group(1).lower()}/{variant.lower()}"
+            if ref in seen_set:
+                continue
+            seen_set.add(ref)
+            seen.append(ref)
+        if seen:
+            try:
+                with open(RANKINGS_HINT_PATH, "w", encoding="utf-8") as f:
+                    json.dump({"fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                               "refs": seen}, f, ensure_ascii=False, indent=2)
+            except OSError:
+                pass
+            return seen, None
+        err = "rankings 页面未提取到模型引用"
+    # 网络失败/未提取到 -> 本地快照兜底
+    try:
+        with open(RANKINGS_HINT_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        refs = data.get("refs") or []
+        if refs:
+            return refs, None
+    except Exception:
+        pass
+    return None, f"rankings 页面获取失败且本地无快照: {err}"
 
 
 def per_million(price_str):
@@ -272,21 +337,42 @@ def main():
                         help="尝试以 OpenRouter 月榜页面作热度排序启发（尽力而为，失败自动回退）")
     parser.add_argument("--include-variants", action="store_true",
                         help="保留 (batch)/(free) 等同模型变体；默认只取每模型主条目")
+    parser.add_argument("--no-cache", action="store_true",
+                        help="本次忽略本地永久存储：全部候选视为新增（等价于 cache.enabled=false 的单次行为）")
     parser.add_argument("--output", default=None,
                         help="JSON 写入路径；缺省输出到 stdout")
     args = parser.parse_args()
 
-    catalog, prov, fatal = fetch_catalog()
+    ignore_store = args.no_cache or not cache_enabled()
+    catalog, prov, fatal, new_ids = fetch_catalog()
     if fatal:
         print(f"ERROR: {fatal}", file=sys.stderr)
         sys.exit(3)
     fetched_at = prov["fetched_at"]
+    catalog_source = "openrouter_api" if not prov.get("cache_hit") else "local_snapshot_fallback"
 
     raw_records = [normalize_catalog_entry(e, fetched_at) for e in catalog]
     if not args.include_variants:
         # 默认剔除同模型变体（:batch/:free 等），避免榜单被重复条目淹没
         raw_records = [r for r in raw_records
                        if ":" not in (r.get("discovered_via") or {}).get("model_id", "")]
+
+    # 与本地永久存储对比去重：base model_id 不在本地快照 且 规范名不在注册表 => 本地没有
+    # 本地已有的不再获取任何数据；只有 is_new=true 的项目需要入库/整理/取评分
+    if ignore_store:
+        for r in raw_records:
+            r["is_new"] = True
+        print("[no-cache] 已忽略本地永久存储：全部候选视为新增（本次会重新取评分）", file=sys.stderr)
+    else:
+        known_ids = _snapshot_ids()
+        known_names = _registry_name_keys()
+        for r in raw_records:
+            base_id = (r.get("discovered_via") or {}).get("model_id", "").split(":")[0].lower()
+            ck = canonical_model_key(r["name"])
+            r["is_new"] = bool(base_id) and base_id not in known_ids and ck not in known_names
+        new_n = sum(1 for r in raw_records if r["is_new"])
+        print(f"[store] 目录 {len(catalog)} 条与本地永久存储对比：新增 {new_n} 条"
+              f"（仅新增入库/整理/取评分），其余复用本地已存信息", file=sys.stderr)
 
     # 排序：月榜启发（优先）或 最新发布优先（回退）
     ranking_source = "openrouter_catalog_latest_first_fallback"
@@ -334,12 +420,17 @@ def main():
         "scope": args.scope,
         "company": args.company,
         "limit": args.limit,
+        "catalog_source": catalog_source,
+        "new_count": sum(1 for r in records if r.get("is_new")),
+        "new_models": [r["name"] for r in records if r.get("is_new")],
         "catalog_count": len(catalog),
         "selected_count": len(records),
         "ranking_source": ranking_source,
         "rankings_heuristic_used": ranking_source.startswith("openrouter_monthly_rankings"),
         "provenance": prov,
-        "note": "本输出仅含模型元数据；Benchmark 分数需另行从可核验来源采集后通过 --add-model 补录",
+        "note": ("目录每次联网获取一次并与本地永久存储对比去重：is_new=true 表示本地没有的项目，"
+                 "仅这些需要入库/整理/取评分；本地已有的直接复用注册表数据（含评分与来源）。"
+                 "Benchmark 分数从可核验来源采集后通过 --add-model 补录"),
     }
     result = {"summary": summary, "models": records}
 

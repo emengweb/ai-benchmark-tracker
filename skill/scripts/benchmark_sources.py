@@ -134,22 +134,24 @@ def aa_slug(model_name):
     return re.sub(r"[^a-z0-9]+", "-", model_name.lower()).strip("-")
 
 
-def fetch_artificial_analysis(model_name):
+def fetch_artificial_analysis(model_name, fresh=False):
     """抓取 https://artificialanalysis.ai/models/<slug>，解析 RSC 中的 gpqa/mmmuPro。
 
     防家族页误配：跟随重定向后若最终 URL 的 slug 与请求不一致（如 /models/glm-5-3-flash
     重定向到 /models/glm-5-3），拒绝采用该页数据。
-    成功结果带磁盘缓存（24h TTL，并发运行与重跑不重复抓取）。
+    成功结果带磁盘缓存（24h TTL；fresh=True 时绕过缓存强制抓取并回写）。
     返回 (observations, status)。
     """
     slug = aa_slug(model_name)
     url = f"https://artificialanalysis.ai/models/{slug}"
     key = hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
-    cached = _page_cache_get(key)
-    if cached is not None:
-        body, final_url = cached
-        err = None
-    else:
+    body = final_url = None
+    err = None
+    if not fresh:
+        cached = _page_cache_get(key)
+        if cached is not None:
+            body, final_url = cached
+    if body is None:
         body, final_url, err = _get_with_final(url)
         if body is not None and err is None:
             _page_cache_set(key, body, final_url)
@@ -216,8 +218,9 @@ def _openrouter_adapter(_models):
 
 
 ADAPTERS = {
-    "artificial_analysis": lambda models: _batch(models, fetch_artificial_analysis),
-    "openrouter_indices": _openrouter_adapter,
+    "artificial_analysis": lambda models, fresh=False: _batch(
+        models, lambda m: fetch_artificial_analysis(m, fresh=fresh)),
+    "openrouter_indices": lambda models, fresh=False: _openrouter_adapter(models),
 }
 
 
@@ -243,14 +246,17 @@ def _batch(models, fn):
                  "per_model": statuses}
 
 
-def fetch_all(models, without=None, limit_per_source=None):
-    """遍历适配器，返回 (observations, statuses)。失败隔离：单源异常不影响其他。"""
+def fetch_all(models, without=None, limit_per_source=None, fresh=False):
+    """遍历适配器，返回 (observations, statuses)。失败隔离：单源异常不影响其他。
+
+    fresh=True 时绕过页缓存强制抓取（用户明确要求最新评分）。
+    """
     all_obs, statuses = [], []
     for name, adapter in ADAPTERS.items():
         if without and name in without:
             continue
         try:
-            obs, st = adapter(models)
+            obs, st = adapter(models, fresh=fresh)
         except Exception as e:  # 适配器自身异常也必须隔离
             st = {"source": name, "status": "error", "error": str(e)}
             obs = []
