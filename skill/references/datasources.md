@@ -101,6 +101,15 @@ $$\\text{综合得分} = (\\text{GPQA Diamond} \\times 0.40) + (\\text{SWE-bench
 
 排序规则：完全依据综合得分进行数学降序排列，且仅在筛选后的目标集合内排位（国内/国际/指定公司榜单各自从 1 开始）；三项分数任一缺失或无效的模型不参与综合排名，在表格中显式标注并排在完整记录之后。
 
+### 聚合站取值规则（防"参考值误当自身分"，P0）
+
+benchlm / vals.ai 等聚合站的指标区块同时含两类数字，取值时**只取模型自身行**：
+
+- **Provider exact / 官方报告行**（形如 `Provider exact <模型> technical report … Score NN.N%`）＝ 模型自身分数；
+- **Best verified / best verified result / Versus best verified row** 属参考行，数字归属榜单最佳模型（如 `Best verified: GPT-6 Astra · 96%`），**禁止取用**；
+- 专属模型页（页面标题含模型名）上的 `Score NN.N%`、`aria-label`、`data-target` 计数器、JSON-LD `Benchmark: <指标> value NN` 均为有效结构化来源；散文段落中的数字不可作为依据；
+- 同一指标在同一页面出现多个标签化数值（例如 Benchmark 自身行与 Vals AI run 行并存）时，全部记录为观察值（`alt_values`）并送人工复核，不静默取一。
+
 ### 地域/公司归类
 
 模型的地域按机构（公司）信息判定，规则表见 `scripts/model_taxonomy.py`（中英文别名 + OpenRouter provider slug，例如：DeepSeek/深度求索、Qwen/阿里、Z.ai/z-ai/智谱、Moonshotai/Kimi/月之暗面、Tencent/Hunyuan/腾讯、MiniMax、Xiaomi/MiMo/小米、OpenAI、Anthropic/Claude、Google/DeepMind/Gemini、NVIDIA、Meta、Mistral、xAI、Microsoft、Amazon、Poolside、Upstage 等）。无法识别的机构标记为 `unknown`，不会进入国内/国际范围筛选结果。

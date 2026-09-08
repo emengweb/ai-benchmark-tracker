@@ -83,6 +83,23 @@
 4. **链接复制错误**：MiniMax 的 swe_url 沿用了 Kimi 的 vals.ai 链接，未与实际数值页面对齐；
 5. **把"域名存在"当成"数值可核验"**：OpenAI/Anthropic 官方页、llm-stats、scale.com、benchlm 聚合页普遍是"页面真实但无数值"或"JS 渲染"，此前没有区分这两者。
 
+## 2026-09-08 修复与落地进展
+
+按本报告的优化方案已完成第一轮落地：
+
+1. **新增 `skill/scripts/verify_scores.py` 自动核验脚本**：抓取每个分数声称来源页 → 结构化多模式提取（Score 行 / aria-label / data-target 计数器 / JSON-LD）→ 按位置排除 "Versus best verified row" 参考行 → "模型+指标+数值"三元组比对；结果写回注册表 `verification` 字段，输出 `score_verification_report.json`（逐指标 ok/mismatch/missing/unverifiable + 证据摘录 + 同页多观察值 alt_values）与 `verify_pending.json`（人工复核队列）。
+2. **导出器改为核验感知**：仅三项分数全部为 ok 的记录参与综合排名；未核验/冲突/缺项的数值显示 `—` 或 `数值⚠`（斜体：灰=未核验、红=冲突），副标题统计未核验模型数。
+3. **修正已确证的数据错误**（来源页自身行比对确认）：
+   - Qwen 3.8 Max GPQA Diamond：89.4 → **92.6**（benchlm 专属页）；
+   - Qwen 3.8 Max SWE-bench Verified：82.5 → **82.4**；MMLU-Pro：88.5 → **88.6**；
+   - Claude Sonnet 5 SWE-bench Verified：94.2 → **85.2**；MMLU-Pro：88.5 → **87.5**；
+   - MiniMax M3 swe_url 由 vals.ai 更正为实际数值所在的 **benchlm.ai/models/minimax-m3**。
+4. **首轮全量核验结果（2026-09-08 实抓）**：15 项分数核验通过（ok）、0 冲突、15 项缺失、24 项无法核验（403/JS 渲染/来源页未收录）。
+   **5 个模型三项全部核验通过、可参与综合排名**：Kimi K3、Claude Sonnet 5、Qwen 3.8 Max、MiniMax M3、DeepSeek V4 Flash；
+   其余 13 个模型因分数无法从声称来源核验，暂不参与综合排名（待人工通过官方系统卡/可复现评测补证后重跑核验）。
+
+遗留待办：openai.com WAF、z.ai SPA 等来源的程序化抓取（P1，目前如实标记 unverified）；openai.com 官方分数人工核对（P2 复核队列）。
+
 ## 优化方案（按优先级）
 
 1. **核验状态字段入注册表（P0）**：每条分数附带 `verified`（true/mismatch/unverified）、`retrieved_at`、`source_type`（official/leaderboard/independent/aggregator）、`evidence`（命中上下文摘录）。导出器据此降级展示：未核验/冲突分数以斜体 + ⚠ 标注，副标题提示"N 项分数未核验"，与现有"数据不完整"机制共用一套语义。

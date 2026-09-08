@@ -95,10 +95,11 @@ The Excel sheet columns MUST strictly follow this exact order:
 
 ## Data Completeness & Honesty Rules
 
-- 综合得分仅在 GPQA Diamond、SWE-bench Verified、MMLU-Pro **三项分数都齐全且有效**时才计算；任何缺项模型在表格中显示 `—`，明确标注“数据不完整，未参与综合排名”，排名从 1 只覆盖完整记录。
+- 综合得分仅在 GPQA Diamond、SWE-bench Verified、MMLU-Pro **三项分数都通过自动核验（status=ok）且数值有效**时才计算；未核验（unverified）/ 核验冲突（mismatch）/ 缺项（missing）的分数在表格中显示 `—` 或 `数值⚠`（斜体），模型标注具体原因且**不参与综合排名**（排名从 1 只覆盖核验通过的记录）。
+- 分数核验由 `verify_scores.py` 完成：抓取来源页 → 结构化提取（Score 行 / aria-label / data-target 计数器 / JSON-LD）→ 排除 "Best verified" 参考行 → "模型+指标+数值"三元组比对；结果写回注册表 `verification` 字段，报告输出 `score_verification_report.json`（含证据摘录）与 `verify_pending.json`（人工复核队列）。
 - **禁止**用 SWE-bench Pro、Artificial Analysis Intelligence/Coding Index、Arena Elo 等代理指标顶替或换算这三个基准分。
-- 分数必须有可核验来源（官方系统卡/基准官方结果页/可复现评测），并记录来源 URL；同一模型多来源冲突时保留所有观察值，按“基准官方 > 厂商系统卡 > 独立评测 > 聚合站”优先级取用，绝不平均。
-- 网络/动态页面不可获取时，如实报告 `unavailable_dynamic_source` / 缓存降级状态，不编造数据。
+- 聚合站（benchlm/vals 等）上 "Provider exact / 官方报告" 行才是模型自身分数，"Best verified" 参考行属于其他模型的最优成绩，禁止取用。
+- 同一指标在同页存在多个标签化观察值时全部记录（`alt_values`），供人工复核；分数必须有可核验来源并记录来源 URL 与核验时间，网络/动态页面不可获取时如实报告并标记 unverified，绝不编造数据。
 
 ## Dynamic Runtime Model Discovery Workflow
 
@@ -123,13 +124,23 @@ python <skill_dir>/scripts/discover_models.py --company openai --limit 20
 - 输出为 JSON（`summary` + `models`），每条记录含：name、institution、region、multimodal、release_date、price_input/output（$/1M）、source_url（OpenRouter 模型页）、discovered_via（来源/获取时间）。**不含伪造分数**。
 - 网络失败自动回退本地缓存 `openrouter_models_cache.json` 并标注 stale；无缓存则报错退出。
 
-### Stage B: 逐模型采集 Benchmark 证据
+### Stage B: 自动核验分数（首选）与人工补证
 
-对 Stage A 选出的每个模型（数量有限，逐模型处理），用 `google:search` 搜索其官方系统卡与基准结果页：
+对 Stage A/C 汇总的分数，先运行自动核验脚本：
 
+```bash
+# 核验注册表全部模型并把结果写回 models_registry.json（verification 字段）
+python <skill_dir>/scripts/verify_scores.py
+
+# 只核验指定模型 / 忽略页面缓存强制重抓
+python <skill_dir>/scripts/verify_scores.py --model "Kimi K3"
+python <skill_dir>/scripts/verify_scores.py --fresh
+```
+
+- 输出 `score_verification_report.json`（逐模型逐指标：ok/mismatch/missing/unverifiable + 证据摘录）与 `verify_pending.json`（人工复核队列）。
+- 对核验为 unverified / missing / mismatch 的分数，再用 `google:search` 搜官方系统卡、基准官方结果页或可复现评测，核对后通过 `--add-model` 更新注册表并重跑核验。
 - 查询词：`"<模型名>" "GPQA Diamond" "SWE-bench Verified" "MMLU-Pro" pricing`；国内模型另查 OpenCompass 司南与厂商技术博客。
-- 提取字段：GPQA Diamond %、SWE-bench Verified %、SWE-bench Pro %、MMLU-Pro %、输入/输出定价（$/M token）、发布年月、核心定位、以及**每条分数对应的来源直链**。
-- 记录分数来源类型与获取时间；无法核验的分数**留空**（不要臆造），进入导出时即为“数据不完整”状态。
+- 提取字段：GPQA Diamond %、SWE-bench Verified %、SWE-bench Pro %、MMLU-Pro %、输入/输出定价（$/M token）、发布年月、核心定位、以及**每条分数对应的来源直链**；无法核验的分数**留空或保持 ⚠ 未核验状态**（不要臆造）。
 - 权威 Benchmark 数据集（SWE-bench、MMLU-Pro 的 Hugging Face 数据）不是实时成绩接口，不能用下载数据集代替模型得分。
 
 ### Stage C: 补录新模型并按范围导出 Excel
@@ -150,8 +161,9 @@ python <skill_dir>/scripts/export_benchmark_excel.py
 ```
 
 - 导出器按机构地域自动归类（规则表 `model_taxonomy.py`）；筛选结果为 0 时脚本报错退出，不产出全量文件。
-- 排名只在筛选后的集合内计算并从 1 开始；数据不完整的模型不占排名。
+- 排名只在筛选后的集合内计算并从 1 开始；**只有三项分数全部核验通过（ok）的模型参与排名**，其余模型展示 `—`/`数值⚠` 并标注原因，不占排名。
 - 文件名/表格标题/副标题/底部溯源索引全部随范围联动（例如国内榜：`2026国内主流AI模型综合能力与跑分天梯榜_<YYYYMMDD_HHMMSS>.xlsx`）。
+- 建议流程顺序：`discover_models.py`（发现）→ `--add-model`（补录）→ `verify_scores.py`（核验写回）→ 导出。
 
 Formula:
 Composite Score = (GPQA Diamond × 0.40) + (SWE-bench Verified × 0.35) + (MMLU-Pro × 0.25)

@@ -110,9 +110,9 @@ DEFAULT_MODELS = [
         "multimodal": True,
         "release_date": "2026-06",
         "gpqa": 88.9,
-        "swe_verified": 94.2,
+        "swe_verified": 85.2,
         "swe_pro": 65.4,
-        "mmlu_pro": 88.5,
+        "mmlu_pro": 87.5,
         "price_input": 3.00,
         "price_output": 15.00,
         "notes": "兼顾前沿智力与极高执行稳定性的日常生产力首选，Terminal-Bench 得分领先",
@@ -189,10 +189,10 @@ DEFAULT_MODELS = [
         "attribute": "开源/商用",
         "multimodal": True,
         "release_date": "2026-08",
-        "gpqa": 89.4,
-        "swe_verified": 82.5,
+        "gpqa": 92.6,
+        "swe_verified": 82.4,
         "swe_pro": 62.5,
-        "mmlu_pro": 88.5,
+        "mmlu_pro": 88.6,
         "price_input": 2.00,
         "price_output": 6.00,
         "notes": "2.4T 密集 MoE 超大底座，在国产模型中拥有最完整的长程自主 Agent 决策链",
@@ -210,7 +210,7 @@ DEFAULT_MODELS = [
         "gpqa_url": "https://www.requesty.ai/models/fireworks/minimax-m3",
         "swe_verified": 80.5,
         "swe_tag": "[11b]",
-        "swe_url": "https://www.vals.ai/models/minimax_MiniMax-M3",
+        "swe_url": "https://benchlm.ai/models/minimax-m3",
         "swe_pro": 58.2,
         "mmlu_pro": 84.2,
         "mmlu_tag": "[11b]",
@@ -416,23 +416,70 @@ def metric_value(m, key):
     return v
 
 
-def prepare_models(models):
-    """为每条记录补齐指标、缺失项与综合得分（不修改传入记录）。
+def metric_verification(m, key):
+    """读取该指标的最新核验记录；无记录视为未核验（legacy）。"""
+    vm = ((m.get("verification") or {}).get("metrics") or {}).get(key)
+    if not vm:
+        return {"status": "unverified", "claimed": m.get(key)}
+    return vm
 
-    返回 [{...原字段, "_metrics": {...}, "_missing": [...], "composite_score": float|None}]
+
+def metric_state(m, key):
+    """综合核验记录与数值合法性，返回 {value, status, qualified}。
+
+    status 语义（对应 verify_scores.py 输出 + legacy）：
+      ok          已核验且数值一致 -> 可参与综合排名
+      mismatch    来源值与声称值冲突（展示 verified_value，需人工复核）
+      missing     来源页无值 / 注册表缺项
+      unverified  未核验或无法核验（JS 渲染 / 被拦截 / 来源页未提及）
+    只要任一指标不是 ok，该模型即不参与综合排名（诚实性原则）。
+    """
+    vm = metric_verification(m, key)
+    st = vm.get("status", "unverified")
+    claimed = metric_value(m, key)
+    verified = metric_value(vm, "verified_value") if vm.get("verified_value") is not None else None
+
+    if st == "ok":
+        value = verified if verified is not None else claimed
+        if value is None:
+            st = "missing"
+    elif st == "mismatch":
+        value = verified
+    elif st == "missing":
+        value = None
+    else:  # unverified / legacy
+        value = claimed
+        st = "unverified"
+    return {"value": value, "status": st, "qualified": st == "ok"}
+
+
+def prepare_models(models):
+    """为每条记录补齐指标状态、缺失原因与综合得分（不修改传入记录）。
+
+    资格规则：仅当 GPQA / SWE-bench Verified / MMLU-Pro 三项 metric_state 全部
+    qualified（核验状态为 ok 且数值合法）才计算综合得分并参与排名；否则按原因
+    标注（缺少 / 未核验 / 核验冲突），输出为“—”且不占排名。
     """
     prepared = []
     for m in models:
         p = dict(m)
-        metrics = {k: metric_value(m, k) for k in REQUIRED_METRICS}
-        missing = [label for k, label in REQUIRED_METRICS.items() if metrics[k] is None]
-        p["_metrics"] = metrics
-        p["_missing"] = missing
-        if missing:
+        states = {k: metric_state(m, k) for k in REQUIRED_METRICS}
+        reasons = []
+        for k, label in REQUIRED_METRICS.items():
+            st = states[k]
+            if st["status"] == "missing":
+                reasons.append(f"缺少 {label}")
+            elif st["status"] == "mismatch":
+                reasons.append(f"{label} 核验冲突（来源值与声称值不一致）")
+            elif st["status"] == "unverified":
+                reasons.append(f"{label} 未核验")
+        p["_metric_states"] = states
+        p["_missing"] = reasons
+        if reasons:
             p["composite_score"] = None
         else:
             p["composite_score"] = round(
-                sum(metrics[k] * w for k, w in WEIGHTS.items()), 2
+                sum(states[k]["value"] * w for k, w in WEIGHTS.items()), 2
             )
         prepared.append(p)
     return prepared
@@ -582,6 +629,8 @@ def generate_excel(models_data=None, output_path=None, scope="all", company=None
     font_bold_cell = Font(name="Microsoft YaHei", size=9.5, bold=True, color="000000")
     font_rank_top3 = Font(name="Microsoft YaHei", size=10, bold=True, color="C00000")
     font_muted = Font(name="Microsoft YaHei", size=9.5, italic=True, color="808080")
+    font_warn = Font(name="Microsoft YaHei", size=9.5, italic=True, color="BF8F00")
+    font_warn_bad = Font(name="Microsoft YaHei", size=9.5, italic=True, bold=True, color="C00000")
 
     font_subscript_link = Font(name="Microsoft YaHei", size=8, vertAlign="subscript", color="0563C1", underline="single")
     font_link_full = Font(name="Microsoft YaHei", size=9, color="0563C1", underline="single")
@@ -613,7 +662,7 @@ def generate_excel(models_data=None, output_path=None, scope="all", company=None
     ws1.merge_cells("A2:N2")
     incomplete_note = ""
     if incomplete:
-        incomplete_note = f" | {len(incomplete)} 个模型 BenchMark 数据不完整，未参与综合排名"
+        incomplete_note = f" | {len(incomplete)} 个模型 BenchMark 未完全核验或数据不完整，未参与综合排名（⚠=未核验/核验冲突）"
     ws1["A2"] = (
         f"跟踪范围：{scope_label} | 生成时间：{now.strftime('%Y-%m-%d %H:%M:%S')}"
         f"{incomplete_note} | 评分来源列放置于得分列后，仅数字带直链"
@@ -660,8 +709,16 @@ def generate_excel(models_data=None, output_path=None, scope="all", company=None
 
         notes = m.get("notes") or ""
         if not complete:
-            missing_label = "、".join(m["_missing"])
-            notes = f"【数据不完整，未参与综合排名：缺少 {missing_label}】{notes}"
+            causes = "、".join(m["_missing"])
+            notes = f"【未参与综合排名：{causes}】{notes}"
+
+        g_state = m["_metric_states"]["gpqa"]
+        s_state = m["_metric_states"]["swe_verified"]
+        p_state = metric_state(m, "swe_pro")  # 仅展示，不计入综合
+        l_state = m["_metric_states"]["mmlu_pro"]
+
+        def cell_val(st):
+            return st["value"] / 100.0 if st["value"] is not None else "—"
 
         row_data = [
             m["rank"] if complete else "—",
@@ -672,10 +729,10 @@ def generate_excel(models_data=None, output_path=None, scope="all", company=None
             m.get("release_date") or "—",
             m["composite_score"] if complete else "—",
             fn_formula,
-            m["_metrics"]["gpqa"] / 100.0 if m["_metrics"]["gpqa"] is not None else "—",
-            m["_metrics"]["swe_verified"] / 100.0 if m["_metrics"]["swe_verified"] is not None else "—",
-            metric_value(m, "swe_pro") / 100.0 if metric_value(m, "swe_pro") is not None else "—",
-            m["_metrics"]["mmlu_pro"] / 100.0 if m["_metrics"]["mmlu_pro"] is not None else "—",
+            cell_val(g_state),
+            cell_val(s_state),
+            cell_val(p_state),
+            cell_val(l_state),
             pricing_str,
             notes
         ]
@@ -714,37 +771,65 @@ def generate_excel(models_data=None, output_path=None, scope="all", company=None
                 cell.font = font_subscript_link if fn_tag else font_muted
             elif col_idx == 9:  # GPQA
                 cell.alignment = align_right
+                st = g_state
                 if isinstance(row_data[8], str):
                     cell.font = font_muted
-                else:
+                elif st["status"] == "ok":
                     cell.number_format = '0.0%'
                     if "gpqa_url" in m:
-                        cell.value = f'=HYPERLINK("{m["gpqa_url"]}", "{m["_metrics"]["gpqa"]:.1f}% {m.get("gpqa_tag", "")}")'
+                        cell.value = f'=HYPERLINK("{m["gpqa_url"]}", "{st["value"]:.1f}% {m.get("gpqa_tag", "")}")'
                         cell.font = font_subscript_link
+                elif st["status"] == "mismatch":
+                    cell.number_format = '0.0%"⚠"'
+                    cell.font = font_warn_bad
+                else:
+                    cell.number_format = '0.0%"⚠"'
+                    cell.font = font_warn
             elif col_idx == 10:  # SWE-bench Verified
                 cell.alignment = align_right
+                st = s_state
                 if isinstance(row_data[9], str):
                     cell.font = font_muted
-                else:
+                elif st["status"] == "ok":
                     cell.number_format = '0.0%'
                     if "swe_url" in m:
-                        cell.value = f'=HYPERLINK("{m["swe_url"]}", "{m["_metrics"]["swe_verified"]:.1f}% {m.get("swe_tag", "")}")'
+                        cell.value = f'=HYPERLINK("{m["swe_url"]}", "{st["value"]:.1f}% {m.get("swe_tag", "")}")'
                         cell.font = font_subscript_link
-            elif col_idx == 11:  # SWE-bench Pro
+                elif st["status"] == "mismatch":
+                    cell.number_format = '0.0%"⚠"'
+                    cell.font = font_warn_bad
+                else:
+                    cell.number_format = '0.0%"⚠"'
+                    cell.font = font_warn
+            elif col_idx == 11:  # SWE-bench Pro（仅展示）
                 cell.alignment = align_right
+                st = p_state
                 if isinstance(row_data[10], str):
                     cell.font = font_muted
+                elif st["status"] == "mismatch":
+                    cell.number_format = '0.0%"⚠"'
+                    cell.font = font_warn_bad
+                elif st["status"] == "ok":
+                    cell.number_format = '0.0%'
                 else:
                     cell.number_format = '0.0%'
+                    cell.font = font_muted
             elif col_idx == 12:  # MMLU-Pro
                 cell.alignment = align_right
+                st = l_state
                 if isinstance(row_data[11], str):
                     cell.font = font_muted
-                else:
+                elif st["status"] == "ok":
                     cell.number_format = '0.0%'
                     if "mmlu_url" in m:
-                        cell.value = f'=HYPERLINK("{m["mmlu_url"]}", "{m["_metrics"]["mmlu_pro"]:.1f}% {m.get("mmlu_tag", "")}")'
+                        cell.value = f'=HYPERLINK("{m["mmlu_url"]}", "{st["value"]:.1f}% {m.get("mmlu_tag", "")}")'
                         cell.font = font_subscript_link
+                elif st["status"] == "mismatch":
+                    cell.number_format = '0.0%"⚠"'
+                    cell.font = font_warn_bad
+                else:
+                    cell.number_format = '0.0%"⚠"'
+                    cell.font = font_warn
             elif col_idx == 13:  # Pricing
                 cell.alignment = align_center
             elif col_idx == 14:  # Notes
@@ -792,7 +877,7 @@ def generate_excel(models_data=None, output_path=None, scope="all", company=None
             c.font = font_cell
             c.alignment = align_left if col_idx > 1 else align_center
     ws2.append([])
-    ws2.append(["综合得分公式", "GPQA Diamond × 0.40 + SWE-bench Verified × 0.35 + MMLU-Pro × 0.25", "", "仅三项数据均完整时参与综合排名；不完整模型标注缺失项且不占排名"])
+    ws2.append(["综合得分公式", "GPQA Diamond × 0.40 + SWE-bench Verified × 0.35 + MMLU-Pro × 0.25", "", "仅三项分数均核验通过（ok）且完整时参与综合排名；未核验/核验冲突/缺项模型不占排名"])
     for col_idx in range(1, 5):
         c = ws2.cell(row=ws2.max_row, column=col_idx)
         c.font = font_bold_cell
