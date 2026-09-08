@@ -17,3 +17,6 @@ render_scores.json
 *.xlsx
 # 会话内部计划文档
 .zcode/
+
+# 渲染调试转储
+_*_rendered.txt
