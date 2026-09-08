@@ -20,12 +20,14 @@
   stale=True；快照也没有则报错退出，不编造任何模型。
 """
 import argparse
+import gzip
 import json
 import os
 import random
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import urllib.error
 import urllib.request
@@ -43,20 +45,24 @@ OPENROUTER_MODELS_API = "https://openrouter.ai/api/v1/models"
 OPENROUTER_RANKINGS_URL = "https://openrouter.ai/rankings?view=month"
 CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "openrouter_models_cache.json")
 RANKINGS_HINT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "openrouter_rankings_hint.json")
-DEFAULT_LIMIT = 20
+DEFAULT_LIMIT = 40
 USER_AGENT = "ai-benchmark-tracker/1.0 (local skill adapter)"
 
 
 def http_get(url, timeout=25, retries=3):
-    """带回退与 Retry-After 的 GET；成功返回 (payload_str, None)，失败返回 (None, err)。"""
+    """带回退、Retry-After 与 gzip 的 GET；成功返回 (payload_str, None)，失败返回 (None, err)。"""
     last_err = None
     for attempt in range(retries):
         try:
             req = urllib.request.Request(
-                url, headers={"User-Agent": USER_AGENT, "Accept": "application/json,text/html;q=0.9"}
+                url, headers={"User-Agent": USER_AGENT, "Accept": "application/json,text/html;q=0.9",
+                              "Accept-Encoding": "gzip"}
             )
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return resp.read().decode("utf-8", "replace"), None
+                raw = resp.read()
+                if (resp.headers.get("Content-Encoding") or "").lower() == "gzip":
+                    raw = gzip.decompress(raw)
+                return raw.decode("utf-8", "replace"), None
         except urllib.error.HTTPError as e:
             retry_after = e.headers.get("Retry-After") if e.headers else None
             last_err = f"HTTP {e.code} {e.reason}"
@@ -166,44 +172,144 @@ def fetch_catalog():
     ), []
 
 
-def fetch_rankings_hint():
-    """尽力而为：按月榜页面提取 'provider/model' 引用（首次出现顺序）作热度排序。
+def _rendered_ranking_refs(url):
+    """Playwright 渲染月榜页并按 DOM 顺序提取全部 /provider/model 链接。
 
-    网络优先；成功后永久存至 openrouter_rankings_hint.json；失败时回退本地快照，
-    保证弱网环境下热度排序仍可用。均失败返回 None。
+    原始 HTML 中可见榜单是 JS 渲染的（正则只能捞到 ~8 条 + 垃圾链接），
+    渲染后才能拿到完整热度列表。无 playwright / 渲染失败返回 None。
     """
-    payload, err = http_get(OPENROUTER_RANKINGS_URL, timeout=25, retries=1)
-    if payload:
-        seen = []
-        seen_set = set()
-        for m in re.finditer(r'href="/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)"', payload):
-            variant = m.group(2)
-            if ":" in variant or "?" in variant or "=" in variant:
-                continue
-            ref = f"{m.group(1).lower()}/{variant.lower()}"
-            if ref in seen_set:
-                continue
-            seen_set.add(ref)
-            seen.append(ref)
-        if seen:
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return None
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
             try:
-                with open(RANKINGS_HINT_PATH, "w", encoding="utf-8") as f:
-                    json.dump({"fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                               "refs": seen}, f, ensure_ascii=False, indent=2)
-            except OSError:
-                pass
-            return seen, None
-        err = "rankings 页面未提取到模型引用"
-    # 网络失败/未提取到 -> 本地快照兜底
+                page = browser.new_page(viewport={"width": 1600, "height": 1000})
+                page.goto(url, wait_until="domcontentloaded", timeout=90000)
+                page.wait_for_timeout(8000)
+                return page.evaluate(
+                    "() => Array.from(document.querySelectorAll('a[href]'))"
+                    ".map(a => a.getAttribute('href'))") or None
+            finally:
+                browser.close()
+    except Exception:
+        return None
+
+
+def _extract_refs_from_hrefs(hrefs):
+    """从 href 列表提取 'provider/model' 引用（去重前先不过滤，保序）。"""
+    out = []
+    for href in hrefs or []:
+        if not href or not href.startswith("/") or href.count("/") != 2:
+            continue
+        provider, model = href.strip("/").split("/")
+        if ":" in model or "?" in href or "=" in href:
+            continue
+        if not re.fullmatch(r"[a-z0-9_.-]+", provider) or not re.fullmatch(r"[a-z0-9_.-]+", model):
+            continue
+        out.append(f"{provider.lower()}/{model.lower()}")
+    return out
+
+
+def _extract_refs_from_text(text):
+    """从页面内嵌数据（Next.js RSC flight）提取 provider/model 引用。
+
+    月榜完整榜单在内嵌数据里（形如 tencent/hy4-preview-20260827 的 canonical slug），
+    原始 <a href> 只有可见的前几条；噪声（next/static 等）由调用方按目录 id 过滤。
+    """
+    out = []
+    for a, b in re.findall(r"([a-z0-9][a-z0-9_-]{1,30})/([a-z0-9][a-z0-9_.-]{1,40})", text or ""):
+        if ":" in b or b.startswith(".") or b.endswith(".png") or b.endswith(".woff2"):
+            continue
+        out.append(f"{a}/{b}".lower())
+    return out
+
+
+def _load_hint():
     try:
         with open(RANKINGS_HINT_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        refs = data.get("refs") or []
+            refs = (json.load(f) or {}).get("refs") or []
+        return refs or None
+    except Exception:
+        return None
+
+
+def fetch_rankings_hint(valid_refs=None, refresh=False):
+    """月榜热度顺序（首次出现序），默认走本地永久存储快照（秒级）。
+
+    快照缺失或 refresh=True 时联网重取，两条通道并行执行后合并去重：
+      1) 原始页面内嵌数据（Next.js RSC，含完整榜单，轻量 ~3s）；
+      2) Playwright 渲染后的 DOM 链接（可见榜单顺序，~20s，慢不阻塞快通道）。
+    联网重取失败时回退旧快照。结果永久存快照。返回 (refs|None, err)。
+    """
+    if not refresh:
+        snap = _load_hint()
+        if snap:
+            return snap, None
+
+    def _payload_task():
+        t0 = time.time()
+        payload, net_err = http_get(OPENROUTER_RANKINGS_URL, timeout=25, retries=1)
+        if not payload:
+            return None, f"rankings 页面获取失败: {net_err}", time.time() - t0
+        return _extract_refs_from_text(payload), None, time.time() - t0
+
+    def _render_task():
+        t0 = time.time()
+        hrefs = _rendered_ranking_refs(OPENROUTER_RANKINGS_URL)
+        if not hrefs:
+            return None, "渲染月榜未提取到链接", time.time() - t0
+        return _extract_refs_from_hrefs(hrefs), None, time.time() - t0
+
+    def _finish(refs, via):
+        seen, out = set(), []
+        for ref in refs:
+            if valid_refs is not None and ref not in valid_refs:
+                continue
+            if ref in seen:
+                continue
+            seen.add(ref)
+            out.append(ref)
+        if out:
+            _save_hint(out, via=via)
+            return out, None
+        return None, "月榜未提取到模型引用"
+
+    t0 = time.time()
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        fut_payload = ex.submit(_payload_task)
+        fut_render = ex.submit(_render_task)
+        payload_refs, payload_err, t_payload = fut_payload.result()
+        render_refs, render_err, t_render = fut_render.result()
+    print(f"[hint] 内嵌数据 {len(payload_refs or [])} 条({t_payload:.1f}s) / "
+          f"渲染 {len(render_refs or [])} 条({t_render:.1f}s)，并行总耗时 {time.time() - t0:.1f}s",
+          file=sys.stderr)
+
+    merged = list(render_refs or []) + list(payload_refs or [])
+    if merged:
+        refs, e = _finish(merged, via="rendered+payload")
         if refs:
             return refs, None
-    except Exception:
+        err = e
+    else:
+        err = payload_err or render_err or "月榜未提取到模型引用"
+
+    snap = _load_hint()
+    if snap:
+        print(f"WARNING: {err}，回退本地热度快照", file=sys.stderr)
+        return snap, None
+    return None, err
+
+
+def _save_hint(refs, via):
+    try:
+        with open(RANKINGS_HINT_PATH, "w", encoding="utf-8") as f:
+            json.dump({"fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                       "via": via, "refs": refs}, f, ensure_ascii=False, indent=2)
+    except OSError:
         pass
-    return None, f"rankings 页面获取失败且本地无快照: {err}"
 
 
 def per_million(price_str):
@@ -337,11 +443,14 @@ def main():
                         help="尝试以 OpenRouter 月榜页面作热度排序启发（尽力而为，失败自动回退）")
     parser.add_argument("--include-variants", action="store_true",
                         help="保留 (batch)/(free) 等同模型变体；默认只取每模型主条目")
+    parser.add_argument("--refresh-hint", action="store_true",
+                        help="强制重新提取月榜热度（内嵌数据+渲染并行，合并去重；默认读本地热度快照）")
     parser.add_argument("--no-cache", action="store_true",
                         help="本次忽略本地永久存储：全部候选视为新增（等价于 cache.enabled=false 的单次行为）")
     parser.add_argument("--output", default=None,
                         help="JSON 写入路径；缺省输出到 stdout")
     args = parser.parse_args()
+    t_start = time.time()
 
     ignore_store = args.no_cache or not cache_enabled()
     catalog, prov, fatal, new_ids = fetch_catalog()
@@ -378,26 +487,51 @@ def main():
     # 排序：月榜启发（优先）或 最新发布优先（回退）
     ranking_source = "openrouter_catalog_latest_first_fallback"
     hint = None
+    hint_count = 0
     if args.use_rankings:
-        hint, hint_err = fetch_rankings_hint()
+        # 目录 id + canonical_slug（含带日期的 canonical 版本）作为合法引用集，过滤噪声
+        valid_refs = set()
+        for e in catalog:
+            base = (e.get("id") or "").split(":")[0].lower()
+            if base:
+                valid_refs.add(base)
+            cs = e.get("canonical_slug")
+            if cs:
+                valid_refs.add(str(cs).lower())
+        hint, hint_err = fetch_rankings_hint(valid_refs=valid_refs, refresh=args.refresh_hint)
         if hint:
+            hint_count = len(hint)
             ranking_source = "openrouter_monthly_rankings_heuristic"
+            if not args.refresh_hint:
+                print(f"[store] 月榜热度使用本地永久存储快照（{hint_count} 条）；"
+                      f"重新提取加 --refresh-hint", file=sys.stderr)
+            if hint_count < args.limit:
+                print(f"NOTE: 月榜可见热度 {hint_count} 条，不足 limit={args.limit}，"
+                      f"其余按目录最新发布排序补充", file=sys.stderr)
         else:
-            print(f"WARNING: {hint_err}，回退到目录最新发布优先排序", file=sys.stderr)
-        if hint is None:
             hint = []
+            print(f"WARNING: {hint_err}，回退到目录最新发布优先排序", file=sys.stderr)
 
     slug_of = lambda r: (r.get("discovered_via") or {}).get("model_id", "").split(":")[0].lower()
+
+    def created_of(r):
+        try:
+            return datetime.strptime(r["release_date"], "%Y-%m").timestamp()
+        except Exception:
+            return 0.0
+
     if ranking_source.startswith("openrouter_monthly_rankings"):
         order = {ref: i for i, ref in enumerate(hint)}
-        raw_records.sort(key=lambda r: order.get(slug_of(r), 10 ** 9))
+
+        def hot_key(r):
+            o = order.get(slug_of(r))
+            if o is not None:
+                return (0, o, 0.0)          # 月榜热度区内按热度
+            return (1, 0, -created_of(r))   # 超出月榜可见范围：最新发布补充在后
+
+        raw_records.sort(key=hot_key)
     else:
         # 无 created 的排最后；其余按发布时间倒序（最新在前）
-        def created_of(r):
-            try:
-                return datetime.strptime(r["release_date"], "%Y-%m").timestamp()
-            except Exception:
-                return 0.0
         raw_records.sort(key=lambda r: created_of(r), reverse=True)
 
     # 过滤：地域 + 公司
@@ -428,6 +562,7 @@ def main():
         "selected_count": len(records),
         "ranking_source": ranking_source,
         "rankings_heuristic_used": ranking_source.startswith("openrouter_monthly_rankings"),
+        "rankings_hint_count": hint_count if ranking_source.startswith("openrouter_monthly_rankings") else 0,
         "provenance": prov,
         "note": ("目录每次联网获取一次并与本地永久存储对比去重：is_new=true 表示本地没有的项目，"
                  "仅这些需要入库/整理/取评分；本地已有的直接复用注册表数据（含评分与来源）。"
@@ -443,6 +578,7 @@ def main():
         print(json.dumps(result, ensure_ascii=False, indent=2))
     # 状态摘要走 stderr，便于管道使用 stdout
     print(json.dumps(summary, ensure_ascii=False), file=sys.stderr)
+    print(f"[timing] 发现总耗时 {time.time() - t_start:.1f}s", file=sys.stderr)
 
 
 if __name__ == "__main__":

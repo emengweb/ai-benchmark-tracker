@@ -71,10 +71,11 @@ Agent 会按 SKILL.md 中的流程执行：解析范围 → 运行时发现模�
 # 1) 运行时发现模型（输出 JSON：summary + models；--company 可与 --scope 叠加）
 #    每次联网获取一次目录，与本地永久存储对比去重：is_new=true 的才是新模型，
 #    只对新增入库/取评分；本地已有的直接复用注册表数据（summary.new_models 列出新增）
-python skill/scripts/discover_models.py --scope domestic --limit 20
-python skill/scripts/discover_models.py --scope domestic --use-rankings --limit 20   # 月榜热度排序（尽力而为）
-python skill/scripts/discover_models.py --company openai --limit 20                  # 公司过滤
-python skill/scripts/discover_models.py --no-cache                                   # 单次忽略本地存储（全部视为新增）
+python skill/scripts/discover_models.py --scope domestic                            # 热度池默认前 40
+python skill/scripts/discover_models.py --scope domestic --use-rankings             # 月榜热度排序（读本地热度快照，秒级）
+python skill/scripts/discover_models.py --use-rankings --refresh-hint               # 强制重取月榜热度（内嵌+渲染并行后合并去重）
+python skill/scripts/discover_models.py --company openai                            # 公司过滤（limit 在筛选后截取）
+python skill/scripts/discover_models.py --no-cache                                  # 单次忽略本地存储（全部视为新增）
 
 # 2) 自动核验分数（写回注册表 verification 字段，含每项评分的来源 URL；导出前建议先跑）
 #    默认只核验"没有核验记录的新模型"；已有核验记录的复用本地永久存储结果

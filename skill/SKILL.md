@@ -167,21 +167,23 @@ The Excel sheet columns MUST strictly follow this exact order:
 以 OpenRouter 公开模型目录为主源（https://openrouter.ai/api/v1/models，公开 JSON），必要时用月榜页（https://openrouter.ai/rankings?view=month）作热度排序启发。执行本地脚本：
 
 ```bash
-# 默认：最新/热门模型（--use-rankings 时尝试月榜顺序启发，失败自动回退最新发布优先）
-python <skill_dir>/scripts/discover_models.py --scope all --use-rankings --limit 20
+# 默认：最新/热门模型，热度池默认前 40（--use-rankings 按月榜热度排序，
+# 超出月榜可见范围的按最新发布补充；--refresh-hint 强制重取月榜热度）
+python <skill_dir>/scripts/discover_models.py --scope all --use-rankings
 
-# 按地域：国内 / 国际
-python <skill_dir>/scripts/discover_models.py --scope domestic --limit 20
-python <skill_dir>/scripts/discover_models.py --scope international --limit 20
+# 按地域：国内 / 国际（limit 在范围筛选之后截取，40 池保证筛选后有足够候选）
+python <skill_dir>/scripts/discover_models.py --scope domestic
+python <skill_dir>/scripts/discover_models.py --scope international
 
 # 按公司：公司名可用中文或英文/别名（openai / deepseek / 智谱 / 月之暗面 ...）
-python <skill_dir>/scripts/discover_models.py --company openai --limit 20
+python <skill_dir>/scripts/discover_models.py --company openai
 ```
 
 - `<skill_dir>` is this skill's installed directory (e.g. `~/.zcode/skills/ai-benchmark-tracker`); resolve the actual path at runtime.
 - Use `python` on Windows, `python3` on Linux/macOS — check availability if the first attempt fails.
 - 输出为 JSON（`summary` + `models`），每条记录含：name、institution、region、multimodal、release_date、price_input/output（$/1M）、source_url（OpenRouter 模型页）、discovered_via（来源/获取时间）、`is_new`（本地永久存储中没有=需要入库/取评分）。**不含伪造分数**。
 - 目录每次联网获取一次并与本地永久存储去重；`summary.new_models` 列出新增模型名。**只对新增模型执行入库与取评分，本地已有的直接复用注册表数据。**
+- 月榜热度（`--use-rankings`）默认读本地快照（秒级）；`--refresh-hint` 强制重新提取——内嵌数据与 Playwright 渲染两条通道**并行**执行后合并去重（热度覆盖更全），失败自动回退快照。
 - 网络失败自动回退本地快照 `openrouter_models_cache.json` 并标注 stale；快照也没有则报错退出。
 
 ### Stage B: 自动核验分数（首选）与人工补证
