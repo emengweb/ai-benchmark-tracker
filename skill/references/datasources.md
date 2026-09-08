@@ -110,7 +110,19 @@ $$\\text{综合得分} = (\\text{GPQA Diamond} \\times 0.40) + (\\text{SWE-bench
 | artificial_analysis | https://artificialanalysis.ai/models/\<slug\> | GPQA Diamond, MMLU-Pro | 解析 RSC 数据流的 `gpqa`/`mmmuPro` 字段（0-1 归一）；带家族页重定向守卫（如 /models/glm-5-3-flash 重定向到 /models/glm-5-3 时拒绝采用） |
 | openrouter_indices | https://openrouter.ai/api/v1/models | AA 三指数（辅助） | `benchmarks.artificial_analysis` 的 intelligence/coding/agentic index，**仅辅助信号，不可顶替三项基准** |
 
-已实测**不可用**、勿再尝试的候选（如实记录探测结论）：LMArena API（`lmarena.ai/api/*` → 403 Forbidden）；OpenCompass 司南（`rank.opencompass.org.cn` 全站 SPA，无公开 JSON 接口）；Scale AI SWE-bench Pro 的 HF space parquet（`lhoestq/ScaleAI-SWE-bench_Pro-atlas`，实为评测**任务数据集**：repo/instance_id/patch 列，不是模型成绩）；swebench.com 与 labs.scale.com/leaderboard（动态渲染、无稳定 JSON）。上述源的分数只能通过浏览器人工取证后录入。
+已实测**不可用**、勿再尝试的候选（如实记录探测结论）：LMArena API（`lmarena.ai/api/*` → 403 Forbidden）与 LMArena leaderboard 渲染（重定向 arena.ai 后正文为空）；OpenCompass 司南直连（全站 SPA，无公开 JSON 接口，**渲染后可用**，见下）；Scale AI SWE-bench Pro 的 HF space parquet（`lhoestq/ScaleAI-SWE-bench_Pro-atlas`，实为评测**任务数据集**：repo/instance_id/patch 列，不是模型成绩）。上述源的分数需浏览器渲染或人工取证后录入。
+
+### 渲染型后备源（render_sources.py，Playwright 无头浏览器）
+
+对无稳定 JSON 的动态榜单页，用 Playwright 渲染后解析正文表格（`pip install playwright && playwright install chromium`；无 Python 包时自动回退全局 Node playwright）：
+
+| 源 | 渲染 URL | 解析指标 | 说明 |
+| --- | --- | --- | --- |
+| swebench | https://www.swebench.com/ | SWE-bench Verified（% RESOLVED） | CSS 网格表（每单元格一行），官方 Verified 榜单，分数含 agent 配置 |
+| opencompass | https://rank.opencompass.org.cn/leaderboard/llm | 均分/知识/推理/数学/代码（ocp_*） | 司南 LLM 官方榜；中文综合维度，**辅助指标**，非 GPQA/SWE/MMLU |
+| scale_seal | https://labs.scale.com/leaderboard | 按区块标题映射（SWE→swe_verified、SWE Atlas→swe_pro、GPQA→gpqa、HLE→hle、FrontierMath→frontiermath） | 分数带 ± 误差；区块标题无法判定时记 aux_seal |
+
+渲染结果与 benchmark_sources 同构（model_display/metric/value/source/source_type/source_url），`verify_scores.py --fallback` 一并采纳为人工复核候选；渲染失败（timeout/empty_page/重定向）如实记录 status，不影响其他源。
 
 ### 聚合站取值规则（防"参考值误当自身分"，P0）
 

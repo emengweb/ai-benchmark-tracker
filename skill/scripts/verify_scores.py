@@ -325,15 +325,26 @@ def apply_fallback(models, without=None):
     绝不自动升级为 ok；命中同时追加到 pending 队列（fallback_candidate）。
     返回 (observations, 命中数, 源状态列表)。
     """
-    try:
-        from benchmark_sources import fetch_all, names_match
-    except ImportError:
-        print("WARNING: 无法加载 benchmark_sources 适配器", file=sys.stderr)
-        return [], 0, [], []
     names = [m["name"] for m in models]
-    obs, statuses = fetch_all(names, without=without)
-    hits = 0
-    extra_pending = []
+    try:
+        from benchmark_sources import fetch_all as fetch_bs, names_match
+    except ImportError:
+        fetch_bs, names_match = None, None
+    obs, statuses, hits, extra_pending = [], [], 0, []
+    if fetch_bs:
+        bs_obs, bs_statuses = fetch_bs(names, without=without)
+        obs.extend(bs_obs)
+        statuses.extend(bs_statuses)
+    try:
+        from render_sources import fetch_all as fetch_rs
+    except ImportError:
+        fetch_rs = None
+    if fetch_rs:
+        rs_obs, rs_statuses = fetch_rs(models=names)
+        obs.extend(rs_obs)
+        statuses.extend(rs_statuses)
+    if names_match is None:
+        return obs, 0, statuses, []
     for m in models:
         vm = (m.get("verification") or {}).get("metrics") or {}
         for key, r in vm.items():

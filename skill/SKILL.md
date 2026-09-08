@@ -142,10 +142,15 @@ python <skill_dir>/scripts/verify_scores.py --fresh
 
 ```bash
 python <skill_dir>/scripts/benchmark_sources.py                          # 单独拉取后备观测
-python <skill_dir>/scripts/verify_scores.py --fallback                  # 核验时同步附加后备候选值
+python <skill_dir>/scripts/render_sources.py --sources swebench,opencompass   # 渲染型后备源（需 playwright）
+python <skill_dir>/scripts/verify_scores.py --fallback                  # 核验时同步附加全部后备候选值
 ```
 
-- 后备源适配器（`benchmark_sources.py`）：**Artificial Analysis 模型页**（GPQA Diamond / MMLU-Pro，RSC 数据流，带家族页重定向守卫）与 **OpenRouter 目录的 AA 三指数**（辅助信号，不进三项基准）。已实测不可用的源不列入：LMArena API（403）、OpenCompass（SPA 无 JSON）、Scale AI parquet（实为任务数据集非成绩）、swebench.com / labs.scale.com（动态渲染）。
+- 后备源三层结构（`--fallback` 自动依次尝试，单源失败不影响其他）：
+  1. **Artificial Analysis 模型页**（GPQA Diamond / MMLU-Pro，RSC 数据流，带家族页重定向守卫）；
+  2. **OpenRouter 目录的 AA 三指数**（辅助信号，不进三项基准）；
+  3. **渲染型榜单**（需 Playwright 无头浏览器：`pip install playwright && playwright install chromium`，或全局 Node playwright 自动回退）——SWE-bench 官方 Verified 榜单（% RESOLVED）、OpenCompass 司南 LLM 官方榜（均分/知识/推理/数学/代码，中文综合维度辅助指标）、Scale AI SEAL 盲测榜单（按区块标题映射基准）。
+- 已实测不可用的源不列入：LMArena API（403）及其 leaderboard 渲染（重定向 arena.ai 后正文为空）、OpenCompass 无渲染的直连、Scale AI parquet（实为任务数据集非成绩）、swebench.com 直连超时（渲染后可用）。
 - 对核验为 unverified / missing / mismatch 的分数，再用 `google:search` 搜官方系统卡、基准官方结果页或可复现评测，核对后通过 `--add-model` 更新注册表并重跑核验。
 - 查询词：`"<模型名>" "GPQA Diamond" "SWE-bench Verified" "MMLU-Pro" pricing`；国内模型另查 OpenCompass 司南与厂商技术博客。
 - 提取字段：GPQA Diamond %、SWE-bench Verified %、SWE-bench Pro %、MMLU-Pro %、输入/输出定价（$/M token）、发布年月、核心定位、以及**每条分数对应的来源直链**；无法核验的分数**留空或保持 ⚠ 未核验状态**（不要臆造）。

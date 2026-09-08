@@ -8,7 +8,7 @@
 - **运行时发现**：以 OpenRouter 公开模型目录 API（`https://openrouter.ai/api/v1/models`）为主源，实时发现并按时效/热度排序模型（月榜页 `https://openrouter.ai/rankings?view=month` 作尽力而为的热度启发，失败自动回退“最新发布优先”），网络故障自动降级到本地缓存，绝不编造模型；内置 18 个模型基线仅作无网络兜底；
 - **诚实评分**：综合得分 = GPQA Diamond × 40% + SWE-bench Verified × 35% + MMLU-Pro × 25%，**仅在三项分数全部通过自动核验（ok）且有效**时计算并参与排名；未核验/核验冲突/缺项的分数显示 `—` 或 `数值⚠`（斜体）并标注原因，不占排名；禁止用 SWE-bench Pro、AI 指数等代理指标顶替三项基准；
 - **自动核验**：`verify_scores.py` 抓取每个分数的声称来源页，结构化提取（Score 行 / aria-label / data-target 计数器 / JSON-LD），排除聚合站 "Best verified" 参考行，做"模型+指标+数值"三元组比对；结果写回注册表 `verification` 字段，输出核验报告（含证据摘录）与人工复核队列 `verify_pending.json`；
-- **后备评分源**：`benchmark_sources.py` 提供多源兜底——Artificial Analysis 模型页（GPQA Diamond / MMLU-Pro）与 OpenRouter 目录的 AA 三指数（辅助），`verify_scores.py --fallback` 自动把后备候选值附到未核验指标（`fallback` 字段 + pending 队列，**不自动升级为 ok**，人工确认后采纳）；单源失败不影响其他源，家族页重定向/名称前缀误配均有守卫；
+- **后备评分源**：三层兜底——① Artificial Analysis 模型页（GPQA Diamond / MMLU-Pro）；② OpenRouter 目录 AA 三指数（辅助）；③ **渲染型榜单**（Playwright 无头浏览器渲染 swebench.com / OpenCompass 司南 / Scale AI SEAL，解析渲染后表格）。`verify_scores.py --fallback` 自动把后备候选值附到未核验指标（`fallback` 字段 + pending 队列，**不自动升级为 ok**，人工确认后采纳）；单源失败不影响其他源，家族页重定向/名称前缀误配均有守卫；
 - **评分溯源**：“评分来源”列使用下标超链接直指模型评测页，多来源模型（如 Kimi K3 的 [4a]/[4b]）在各分数单元格内分别挂链，模型名称保持纯文本无链接；表格底部溯源索引**随筛选结果动态生成**，国内报表不会出现国际数据源条目；
 - **交付物**：带 `YYYYMMDD_HHMMSS` 时间戳后缀的 .xlsx 工作簿（3 个工作表：天梯榜 / 评测基准说明 / 数据源清单），默认生成在当前工作目录；文件名、标题、副标题、排名范围与溯源索引均随所选范围联动。
 
@@ -25,6 +25,8 @@ ai-benchmark-tracker/
         ├── model_taxonomy.py            # 机构 -> 公司/地域 分类规则（中英文别名，单一事实来源）
         ├── discover_models.py           # 运行时发现脚本（OpenRouter 目录 + 月榜热度启发 + 缓存降级）
         ├── benchmark_sources.py         # 后备评分源适配器（AA 模型页 GPQA/MMLU-Pro + OpenRouter AA 指数）
+        ├── render_sources.py            # 渲染型后备源（Playwright 渲染 swebench/司南/SEAL 后解析表格）
+        ├── render_page.cjs              # Node 渲染回退脚本（无 Python playwright 时用全局 Node playwright）
         ├── verify_scores.py             # 分数自动核验（抓取来源页 -> 结构化提取 -> 三元组比对 -> 写回）
         └── export_benchmark_excel.py    # 合并模型、按范围/公司筛选、核验感知排名、导出 xlsx
 ```
@@ -47,7 +49,7 @@ Agent 会按 SKILL.md 中的流程执行：解析范围 → 运行时发现模�
 
 ### 手动运行脚本
 
-依赖：Python 3.x + openpyxl（`pip install openpyxl`）
+依赖：Python 3.x + openpyxl（`pip install openpyxl`）；渲染型后备源另需 Playwright（`pip install playwright && playwright install chromium`，或全局 Node playwright 自动回退；未安装时对应适配器自动降级为 unavailable，不影响其余流程）
 
 ```bash
 # 1) 运行时发现模型（输出 JSON：summary + models；--company 可与 --scope 叠加）
@@ -61,6 +63,7 @@ python skill/scripts/verify_scores.py --model "Kimi K3"        # 只核验指定
 python skill/scripts/verify_scores.py --fresh                  # 忽略页面缓存重新抓取
 python skill/scripts/verify_scores.py --fallback               # 同时拉取后备源候选值（人工复核用）
 python skill/scripts/benchmark_sources.py                      # 单独拉取后备源观测（backup_scores.json）
+python skill/scripts/render_sources.py --sources swebench,opencompass   # 渲染型后备源（render_scores.json）
 
 # 3) 按范围/公司生成天梯榜（默认输出到当前工作目录）
 python skill/scripts/export_benchmark_excel.py --scope domestic                      # 仅国内
