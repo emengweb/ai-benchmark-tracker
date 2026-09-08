@@ -428,10 +428,20 @@ def main():
 
     summary = {"ok": 0, "mismatch": 0, "missing": 0, "unverifiable": 0, "cached": len(cached_skipped)}
     report = {"checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "models": {}}
+    pending = []
     for m in cached_skipped:
         vm = (m.get("verification") or {}).get("metrics") or {}
         report["models"][m["name"]] = {k: {**v, "cached": True} for k, v in vm.items()}
-    pending = []
+        # 缓存模型中的非 ok 项仍要进入人工复核队列，避免每次运行把队列清空
+        for k, r in vm.items():
+            if r.get("status") not in (None, "ok"):
+                pending.append({
+                    "model": m["name"], "metric": REQUIRED_METRICS.get(k, k),
+                    "claimed": r.get("claimed"), "status": r.get("status"),
+                    "source_url": r.get("source_url"),
+                    "reason": r.get("reason") or r.get("evidence", "")[:120] or r.get("status"),
+                    "cached": True,
+                })
     t0 = time.time()
     if models:
         workers = max(1, min(args.workers, MAX_WORKERS, len(models)))

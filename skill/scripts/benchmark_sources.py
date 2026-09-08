@@ -219,12 +219,12 @@ def _openrouter_adapter(_models):
 
 ADAPTERS = {
     "artificial_analysis": lambda models, fresh=False: _batch(
-        models, lambda m: fetch_artificial_analysis(m, fresh=fresh)),
+        models, lambda m: fetch_artificial_analysis(m, fresh=fresh), source="artificial_analysis"),
     "openrouter_indices": lambda models, fresh=False: _openrouter_adapter(models),
 }
 
 
-def _batch(models, fn):
+def _batch(models, fn, source=None):
     """逐模型并发抓取（≤MAX_WORKERS 线程）；单模型异常隔离为 error 状态。"""
     obs, statuses = [], [None] * len(models)
 
@@ -242,7 +242,7 @@ def _batch(models, fn):
             o, st = fut.result()
             obs.extend(o)
             statuses[i] = st
-    return obs, {"source": fn.__name__, "status": "ok" if obs else "no_data",
+    return obs, {"source": source or fn.__name__, "status": "ok" if obs else "no_data",
                  "per_model": statuses}
 
 

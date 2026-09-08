@@ -357,19 +357,20 @@ def main():
         raw_records = [r for r in raw_records
                        if ":" not in (r.get("discovered_via") or {}).get("model_id", "")]
 
-    # 与本地永久存储对比去重：base model_id 不在本地快照 且 规范名不在注册表 => 本地没有
+    # 与本地永久存储对比去重：new_ids 是 fetch_catalog 在覆盖快照"之前"算出的新增
+    # base model_id；再叠加注册表规范名判断（基线模型可能先于目录快照存在）。
     # 本地已有的不再获取任何数据；只有 is_new=true 的项目需要入库/整理/取评分
     if ignore_store:
         for r in raw_records:
             r["is_new"] = True
         print("[no-cache] 已忽略本地永久存储：全部候选视为新增（本次会重新取评分）", file=sys.stderr)
     else:
-        known_ids = _snapshot_ids()
         known_names = _registry_name_keys()
+        new_id_set = set(new_ids)
         for r in raw_records:
             base_id = (r.get("discovered_via") or {}).get("model_id", "").split(":")[0].lower()
             ck = canonical_model_key(r["name"])
-            r["is_new"] = bool(base_id) and base_id not in known_ids and ck not in known_names
+            r["is_new"] = bool(base_id) and (base_id in new_id_set or ck not in known_names)
         new_n = sum(1 for r in raw_records if r["is_new"])
         print(f"[store] 目录 {len(catalog)} 条与本地永久存储对比：新增 {new_n} 条"
               f"（仅新增入库/整理/取评分），其余复用本地已存信息", file=sys.stderr)
