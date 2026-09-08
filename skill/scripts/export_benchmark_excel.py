@@ -922,8 +922,23 @@ def generate_excel(models_data=None, output_path=None, scope="all", company=None
             elif col_idx == 14:  # Notes
                 cell.alignment = align_left
 
+    # 说明区域（表格下方）：评分计算、排名规则与溯源使用说明
+    note_start = start_row + len(ordered) + 1
+    ws1.cell(row=note_start, column=1, value="【评分与排名说明】").font = font_fn_title
+    explanation_lines = [
+        "1. 综合得分 = GPQA Diamond × 40% + SWE-bench Verified × 35% + MMLU-Pro × 25%，四舍五入保留两位小数；",
+        "2. 三项分数均有可用值（已核验 / 未核验声称值 / 后备源候选值）才参与综合排名，排名在当前筛选范围内从 1 重新编号；",
+        "3. 标注 ⚠ 的分数为未通过自动核验或来自后备数据源，仅供参考；— 表示无可用数值；核验冲突（mismatch）的模型不占排名；",
+        "4. 评分来源列的数字与各分数单元格均带直链，点击可跳转原始评测页溯源；聚合站的 Provider exact / 官方报告行才是模型自身分数；",
+        "5. 数据模式见副标题（本地永久存储 / 本次已联网刷新并重验）；需要更新评分时使用提示语『更新最新AI模型评分』。",
+    ]
+    for k, line in enumerate(explanation_lines, 1):
+        c = ws1.cell(row=note_start + k, column=1, value=line)
+        c.font = font_cell
+        c.alignment = align_left
+
     # Footnote Section at Bottom（动态派生，仅包含当前筛选结果的数据源）
-    fn_start = start_row + len(ordered) + 1
+    fn_start = note_start + len(explanation_lines) + 2
     ws1.cell(row=fn_start, column=1, value="【跑分数据来源与精准溯源索引（点击数字直达来源页）】").font = font_fn_title
 
     footnotes = build_footnotes(ordered)

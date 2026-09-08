@@ -71,10 +71,9 @@ Agent 会按 SKILL.md 中的流程执行：解析范围 → 运行时发现模�
 # 1) 运行时发现模型（输出 JSON：summary + models；--company 可与 --scope 叠加）
 #    每次联网获取一次目录，与本地永久存储对比去重：is_new=true 的才是新模型，
 #    只对新增入库/取评分；本地已有的直接复用注册表数据（summary.new_models 列出新增）
-python skill/scripts/discover_models.py --scope domestic                            # 热度池默认前 40
-python skill/scripts/discover_models.py --scope domestic --use-rankings             # 月榜热度排序（读本地热度快照，秒级）
-python skill/scripts/discover_models.py --use-rankings --refresh-hint               # 强制重取月榜热度（内嵌+渲染并行后合并去重）
-python skill/scripts/discover_models.py --company openai                            # 公司过滤（limit 在筛选后截取）
+python skill/scripts/discover_models.py --scope domestic                            # 热度池默认前 40（limit 在范围筛选后截取）
+python skill/scripts/discover_models.py --scope domestic --use-rankings             # 月榜热度排序（每次实时提取最新月榜）
+python skill/scripts/discover_models.py --company openai                            # 公司过滤
 python skill/scripts/discover_models.py --no-cache                                  # 单次忽略本地存储（全部视为新增）
 
 # 2) 自动核验分数（写回注册表 verification 字段，含每项评分的来源 URL；导出前建议先跑）
@@ -148,6 +147,21 @@ python skill/scripts/export_benchmark_excel.py --scope domestic --output /path/t
 | 「关闭缓存」 | 编辑 `config.json` 把 `cache.enabled` 改为 `false`（永久），或单次加 `--no-cache` |
 
 默认流程下，Agent 生成报告时**必须告知**用户本次数据来自本地永久存储（缓存）及上述更新方法；报告副标题中也会自动标注。
+
+## 实时进度输出与性能
+
+所有脚本默认输出实时进度，长任务不再"黑盒等待"：
+
+| 阶段 | 进度信息 |
+|------|---------|
+| 发现 `discover_models.py` | 分步 `[1/3] 目录获取（条数+耗时）` → `[2/3] 月榜热度提取（两条通道各自条数与耗时）` → `[3/3] 去重（新增 N 条）`，结尾 `[timing] 总耗时` |
+| 核验 `verify_scores.py` | 开局列出待核验模型清单；每个来源页实时 `[fetch] 缓存命中 / 完成(耗时) / 失败`；每完成一个模型报 `[进度] 核验完成 x/N，剩余: …` |
+| 后备源 | `[artificial_analysis] 进度 x/N 模型 -> 状态（观测条数）`；`[render] 源名 渲染中/解析完成（耗时、命中条数）`，三个渲染源并行 |
+| 入库 `--add-model` | `Added/updated model: X（注册表共 N 个模型）` |
+
+性能要点：全部网络请求启用 gzip；核验与后备源 ≤6 线程并发；月榜热度两条通道并行提取（内嵌数据 ~8s ∥ Playwright 渲染 ~23s，取最大值），失败自动回退本地热度快照。
+
+每份天梯榜主表下方自带【评分与排名说明】区域：综合得分公式（GPQA Diamond × 40% + SWE-bench Verified × 35% + MMLU-Pro × 25%）、排名资格规则、⚠/— 标注语义、溯源直链用法与数据模式说明。
 
 ## 安装方法
 

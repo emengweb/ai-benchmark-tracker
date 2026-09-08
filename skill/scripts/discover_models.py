@@ -236,19 +236,15 @@ def _load_hint():
         return None
 
 
-def fetch_rankings_hint(valid_refs=None, refresh=False):
-    """月榜热度顺序（首次出现序），默认走本地永久存储快照（秒级）。
+def fetch_rankings_hint(valid_refs=None):
+    """实时提取月榜热度顺序（每次 --use-rankings 都取最新，快照仅作失败兜底）。
 
-    快照缺失或 refresh=True 时联网重取，两条通道并行执行后合并去重：
-      1) 原始页面内嵌数据（Next.js RSC，含完整榜单，轻量 ~3s）；
-      2) Playwright 渲染后的 DOM 链接（可见榜单顺序，~20s，慢不阻塞快通道）。
-    联网重取失败时回退旧快照。结果永久存快照。返回 (refs|None, err)。
+    两条通道并行执行后合并去重：
+      1) 原始页面内嵌数据（Next.js RSC，含完整榜单，轻量）；
+      2) Playwright 渲染后的 DOM 链接（可见榜单顺序）。
+    渲染顺序在前、内嵌数据补充；按 valid_refs（目录 id/canonical_slug）过滤噪声，
+    结果永久存快照；失败时回退本地快照。返回 (refs|None, err)。
     """
-    if not refresh:
-        snap = _load_hint()
-        if snap:
-            return snap, None
-
     def _payload_task():
         t0 = time.time()
         payload, net_err = http_get(OPENROUTER_RANKINGS_URL, timeout=25, retries=1)
@@ -443,8 +439,6 @@ def main():
                         help="尝试以 OpenRouter 月榜页面作热度排序启发（尽力而为，失败自动回退）")
     parser.add_argument("--include-variants", action="store_true",
                         help="保留 (batch)/(free) 等同模型变体；默认只取每模型主条目")
-    parser.add_argument("--refresh-hint", action="store_true",
-                        help="强制重新提取月榜热度（内嵌数据+渲染并行，合并去重；默认读本地热度快照）")
     parser.add_argument("--no-cache", action="store_true",
                         help="本次忽略本地永久存储：全部候选视为新增（等价于 cache.enabled=false 的单次行为）")
     parser.add_argument("--output", default=None,
@@ -452,6 +446,9 @@ def main():
     args = parser.parse_args()
     t_start = time.time()
 
+    total_steps = 3 if args.use_rankings else 2
+    print(f"[1/{total_steps}] 获取 OpenRouter 模型目录（联网一次）...", file=sys.stderr)
+    t_step = time.time()
     ignore_store = args.no_cache or not cache_enabled()
     catalog, prov, fatal, new_ids = fetch_catalog()
     if fatal:
@@ -459,6 +456,8 @@ def main():
         sys.exit(3)
     fetched_at = prov["fetched_at"]
     catalog_source = "openrouter_api" if not prov.get("cache_hit") else "local_snapshot_fallback"
+    print(f"[1/{total_steps}] 目录获取完成：{len(catalog)} 条（{time.time() - t_step:.1f}s，"
+          f"{'实时' if catalog_source == 'openrouter_api' else '本地快照兜底'}）", file=sys.stderr)
 
     raw_records = [normalize_catalog_entry(e, fetched_at) for e in catalog]
     if not args.include_variants:
@@ -466,6 +465,7 @@ def main():
         raw_records = [r for r in raw_records
                        if ":" not in (r.get("discovered_via") or {}).get("model_id", "")]
 
+    print(f"[2/{total_steps}] 与本地永久存储对比去重（仅新增入库/取评分）...", file=sys.stderr)
     # 与本地永久存储对比去重：new_ids 是 fetch_catalog 在覆盖快照"之前"算出的新增
     # base model_id；再叠加注册表规范名判断（基线模型可能先于目录快照存在）。
     # 本地已有的不再获取任何数据；只有 is_new=true 的项目需要入库/整理/取评分
@@ -489,6 +489,8 @@ def main():
     hint = None
     hint_count = 0
     if args.use_rankings:
+        print(f"[3/{total_steps}] 提取月榜热度（内嵌数据 + 渲染并行，取最新月榜）...", file=sys.stderr)
+        t_step = time.time()
         # 目录 id + canonical_slug（含带日期的 canonical 版本）作为合法引用集，过滤噪声
         valid_refs = set()
         for e in catalog:
@@ -498,13 +500,11 @@ def main():
             cs = e.get("canonical_slug")
             if cs:
                 valid_refs.add(str(cs).lower())
-        hint, hint_err = fetch_rankings_hint(valid_refs=valid_refs, refresh=args.refresh_hint)
+        hint, hint_err = fetch_rankings_hint(valid_refs=valid_refs)
         if hint:
             hint_count = len(hint)
             ranking_source = "openrouter_monthly_rankings_heuristic"
-            if not args.refresh_hint:
-                print(f"[store] 月榜热度使用本地永久存储快照（{hint_count} 条）；"
-                      f"重新提取加 --refresh-hint", file=sys.stderr)
+            print(f"[3/{total_steps}] 月榜热度提取完成：{hint_count} 条（{time.time() - t_step:.1f}s）", file=sys.stderr)
             if hint_count < args.limit:
                 print(f"NOTE: 月榜可见热度 {hint_count} 条，不足 limit={args.limit}，"
                       f"其余按目录最新发布排序补充", file=sys.stderr)
