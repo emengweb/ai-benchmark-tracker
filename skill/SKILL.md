@@ -19,6 +19,40 @@ Automated pipeline for tracking, runtime discovery, and benchmark data aggregati
 - “看看最近有哪些新模型发布，把它们的评测分数合并进榜单”
 - “更新模型天梯榜并上传到 Google Drive”
 
+## 环境依赖与安装（Environment Setup — 换设备必读）
+
+脚本主体仅用 Python 标准库 + 少量可选依赖；为保证换到任何设备都能**完整**获取数据
+（含渲染型后备源），新环境请按顺序准备：
+
+1. **Python 3.9+**（本技能在 3.12 上测试）与 pip；
+2. **核心依赖**（Excel 生成必需）：
+   ```bash
+   pip install openpyxl
+   ```
+3. **渲染引擎（可选但强烈建议）**：缺失时 swebench.com / OpenCompass 司南 / Scale SEAL
+   三个渲染源自动降级为 unavailable（其余功能不受影响）。
+   - 首选 Python Playwright：
+     ```bash
+     pip install playwright
+     playwright install chromium
+     ```
+   - 回退引擎（Node.js 18+，`render_sources.py` 自动探测全局 npm 路径调用 render_page.cjs）：
+     ```bash
+     npm install -g playwright
+     playwright install chromium
+     ```
+   - 国内网络下载浏览器慢/失败时使用镜像：
+     ```bash
+     PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright/ playwright install chromium
+     ```
+4. **安装后自检**（建议执行一次，确认环境完整）：
+   ```bash
+   # 渲染型后备源（应输出 ocp_* 等观测；无 playwright 时显示 unavailable 属预期降级）
+   python <skill_dir>/scripts/render_sources.py --sources opencompass --models "Qwen 3.8 Max"
+   # 全流程核验 + 三层后备源（AA 模型页 / OpenRouter 指数 / 渲染榜单）
+   python <skill_dir>/scripts/verify_scores.py --fallback
+   ```
+
 ## Core Mandate: Deliverable Format
 
 - **Format**: All deliverables MUST be structured Excel workbooks (`.xlsx`). NEVER deliver Word documents or Google Docs unless explicitly requested.

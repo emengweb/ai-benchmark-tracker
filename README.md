@@ -47,9 +47,22 @@ skill 已内置中文触发语义，**无需提及 skill 名称**。在支持 Ag
 
 Agent 会按 SKILL.md 中的流程执行：解析范围 → 运行时发现模型（OpenRouter 目录）→ 逐模型采集评分证据 → 补录注册表并按范围重算排名 → 生成 xlsx →（可选）上传 Google Drive。用户限定了范围时**不会**回退到全量模型。
 
-### 手动运行脚本
+## 依赖与环境准备（换设备必读）
 
-依赖：Python 3.x + openpyxl（`pip install openpyxl`）；渲染型后备源另需 Playwright（`pip install playwright && playwright install chromium`，或全局 Node playwright 自动回退；未安装时对应适配器自动降级为 unavailable，不影响其余流程）
+脚本主体基于 Python 标准库；为完整获取数据（含渲染型后备源）需准备：
+
+| 依赖 | 用途 | 安装命令 | 缺失影响 |
+|---|---|---|---|
+| Python 3.9+ | 全部脚本运行（3.12 测试） | 官网安装包 / `winget install python` | 无法运行 |
+| openpyxl | 生成 .xlsx | `pip install openpyxl` | 无法导出 Excel |
+| Python Playwright（可选） | 渲染 swebench/司南/SEAL 动态榜 | `pip install playwright` + `playwright install chromium` | 渲染源降级 unavailable |
+| Node.js 18+ + 全局 Playwright（可选回退） | render_page.cjs 回退引擎 | `npm install -g playwright` + `playwright install chromium` | 同上（自动回退链路失效） |
+
+国内网络下载浏览器较慢时使用镜像：`PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright/ playwright install chromium`
+
+安装后自检：`python skill/scripts/render_sources.py --sources opencompass --models "Qwen 3.8 Max"` 应输出 ocp_* 观测；`python skill/scripts/verify_scores.py --fallback` 应三层后备源全部执行（渲染源在缺 playwright 时显示 unavailable 属预期降级）。
+
+### 手动运行脚本
 
 ```bash
 # 1) 运行时发现模型（输出 JSON：summary + models；--company 可与 --scope 叠加）
