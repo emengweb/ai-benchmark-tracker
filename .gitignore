@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.pyc
+
+# 运行时生成状态（首次运行自动重建，不入库）
+skill/scripts/models_registry.json
+skill/scripts/openrouter_models_cache.json
+
+# 生成的天梯榜工作簿（可再生交付物，不入库）
+*.xlsx
