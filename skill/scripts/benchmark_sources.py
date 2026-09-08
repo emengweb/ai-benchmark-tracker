@@ -45,20 +45,38 @@ def norm(s):
     return re.sub(r"[^a-z0-9]+", "", str(s).lower())
 
 
+# 包含匹配允许的后缀边界：仅同模型的推理配置/免费变体；pro/batch/mini 等是
+# 不同模型或变体，禁止借用基础模型的后备值
+_ALLOWED_SUFFIXES = ("high", "xhigh", "max", "low", "medium", "thinking", "free", "preview")
+
+
+def _contained(short, long_):
+    """short 是否为 long_ 的完整前缀且边界是允许的配置词/结束。"""
+    i = long_.find(short)
+    if i < 0:
+        return False
+    rest = long_[i + len(short):]
+    if not rest:
+        return True
+    return any(rest == w or rest.startswith(w) for w in _ALLOWED_SUFFIXES)
+
+
 def names_match(a, b):
     """归一化名称匹配：完全相等，或较长者包含较短的完整核心名（≥6 字符）。
 
-    阈值 6 避免家族前缀误配（如 "glm53" 不应匹配 "glm53flash"）；同时容忍
-    "(max)"、版本号 0902、batch 等后缀差异。
+    阈值 6 + 边界词白名单避免家族前缀/变体误配：
+    - "glm53" 不匹配 "glm53flash"（Flash 是另一模型）；
+    - "gpt6astra" 不匹配 "gpt6astrapro"/"gpt6astrabatch"（Pro/batch 不借用基础值）；
+    - "claudeopus5" 匹配 "claudeopus5high"（High 是同模型的推理配置）。
     """
     na, nb = norm(a), norm(b)
     if not na or not nb:
         return False
     if na == nb:
         return True
-    if len(na) >= 6 and na in nb:
+    if len(na) >= 6 and _contained(na, nb):
         return True
-    if len(nb) >= 6 and nb in na:
+    if len(nb) >= 6 and _contained(nb, na):
         return True
     return False
 

@@ -350,6 +350,7 @@ def apply_fallback(models, without=None):
         for key, r in vm.items():
             if r.get("status") == "ok":
                 continue
+            r.pop("fallback", None)  # 清除上一轮残留，按最新匹配规则重算
             cand = [o for o in obs if names_match(m["name"], o["model_display"])
                     and o["metric"] == key]
             if not cand:

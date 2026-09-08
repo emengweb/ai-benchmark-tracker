@@ -185,18 +185,27 @@ def normalize_catalog_entry(entry, fetched_at):
     region, key = classify_institution(provider_slug)
     institution = institution_display(key, fallback=provider_slug or "未知机构")
 
+    # 属性按目录元数据生成（多模态/免费/商用），避免笼统的"运行时发现"
+    attr_bits = []
+    if multimodal:
+        attr_bits.append("多模态")
+    if (price_in or 0) == 0 and (price_out or 0) == 0:
+        attr_bits.append("免费")
+    else:
+        attr_bits.append("商用")
+    attribute = "/".join(attr_bits) or "目录模型"
+
     ctx_text = f"{ctx:,}" if ctx else "未知"
     mod_text = "/".join(sorted(mods)) if mods else "text"
     notes = (
         f"OpenRouter 目录运行时发现（base: {base_id}，上下文 {ctx_text}，"
-        f"模态 {mod_text}）。Benchmark 评分待从可核验来源采集，补齐 "
-        f"GPQA Diamond / SWE-bench Verified / MMLU-Pro 前不参与综合排名。"
+        f"模态 {mod_text}）。Benchmark 评分待从可核验来源采集，未核验分数以 ⚠ 标注。"
     )
 
     return {
         "name": name,
         "institution": institution,
-        "attribute": "运行时发现",
+        "attribute": attribute,
         "region": region,
         "multimodal": multimodal,
         "release_date": release_date,
@@ -245,6 +254,8 @@ def main():
                         help=f"输出候选数量上限（默认 {DEFAULT_LIMIT}）")
     parser.add_argument("--use-rankings", action="store_true",
                         help="尝试以 OpenRouter 月榜页面作热度排序启发（尽力而为，失败自动回退）")
+    parser.add_argument("--include-variants", action="store_true",
+                        help="保留 (batch)/(free) 等同模型变体；默认只取每模型主条目")
     parser.add_argument("--output", default=None,
                         help="JSON 写入路径；缺省输出到 stdout")
     args = parser.parse_args()
@@ -256,6 +267,10 @@ def main():
     fetched_at = prov["fetched_at"]
 
     raw_records = [normalize_catalog_entry(e, fetched_at) for e in catalog]
+    if not args.include_variants:
+        # 默认剔除同模型变体（:batch/:free 等），避免榜单被重复条目淹没
+        raw_records = [r for r in raw_records
+                       if ":" not in (r.get("discovered_via") or {}).get("model_id", "")]
 
     # 排序：月榜启发（优先）或 最新发布优先（回退）
     ranking_source = "openrouter_catalog_latest_first_fallback"

@@ -438,37 +438,44 @@ def metric_state(m, key):
     """综合核验记录与数值合法性，返回 {value, status, qualified}。
 
     status 语义（对应 verify_scores.py 输出 + legacy）：
-      ok          已核验且数值一致 -> 可参与综合排名
-      mismatch    来源值与声称值冲突（展示 verified_value，需人工复核）
-      missing     来源页无值 / 注册表缺项
-      unverified  未核验或无法核验（JS 渲染 / 被拦截 / 来源页未提及）
-    只要任一指标不是 ok，该模型即不参与综合排名（诚实性原则）。
+      ok          已核验且数值一致 -> 参与排名，正常显示
+      unverified  有声称值但未核验 -> 参与排名，⚠ 灰色标注
+      fallback    无声称值但有后备源候选值 -> 参与排名，⚠ 灰色标注（备注来源）
+      mismatch    来源值与声称值冲突（展示 verified_value，需人工复核）-> 不参与排名
+      missing     无任何可用值 -> 显示 —，不参与排名
     """
     vm = metric_verification(m, key)
     st = vm.get("status", "unverified")
     claimed = metric_value(m, key)
     verified = metric_value(vm, "verified_value") if vm.get("verified_value") is not None else None
+    fb_raw = (vm.get("fallback") or {}).get("value")
+    fb = metric_value({"v": fb_raw}, "v") if fb_raw is not None else None
 
     if st == "ok":
         value = verified if verified is not None else claimed
         if value is None:
-            st = "missing"
-    elif st == "mismatch":
-        value = verified
-    elif st == "missing":
-        value = None
-    else:  # unverified / legacy
-        value = claimed
-        st = "unverified"
-    return {"value": value, "status": st, "qualified": st == "ok"}
+            return {"value": None, "status": "missing", "qualified": False}
+        return {"value": value, "status": "ok", "qualified": True}
+    if st == "mismatch":
+        return {"value": verified, "status": "mismatch", "qualified": False}
+    if st == "missing":
+        if fb is not None:
+            return {"value": fb, "status": "fallback", "qualified": True}
+        return {"value": None, "status": "missing", "qualified": False}
+    # unverified / legacy：有声称值用声称值，否则用后备值
+    if claimed is not None:
+        return {"value": claimed, "status": "unverified", "qualified": True}
+    if fb is not None:
+        return {"value": fb, "status": "fallback", "qualified": True}
+    return {"value": None, "status": "missing", "qualified": False}
 
 
 def prepare_models(models):
     """为每条记录补齐指标状态、缺失原因与综合得分（不修改传入记录）。
 
-    资格规则：仅当 GPQA / SWE-bench Verified / MMLU-Pro 三项 metric_state 全部
-    qualified（核验状态为 ok 且数值合法）才计算综合得分并参与排名；否则按原因
-    标注（缺少 / 未核验 / 核验冲突），输出为“—”且不占排名。
+    资格规则：三项指标均有可用值（核验 ok / 未核验但有声称值 / 后备源候选值）
+    即参与综合排名；仅"核验冲突（mismatch）"与"完全无值（missing）"不参与。
+    核验状态通过单元格 ⚠ 标注与备注列呈现，保证排名可用性的同时不丢失诚实性。
     """
     prepared = []
     for m in models:
@@ -480,12 +487,14 @@ def prepare_models(models):
             if st["status"] == "missing":
                 reasons.append(f"缺少 {label}")
             elif st["status"] == "mismatch":
-                reasons.append(f"{label} 核验冲突（来源值与声称值不一致）")
+                reasons.append(f"{label} 核验冲突")
+            elif st["status"] == "fallback":
+                reasons.append(f"{label} 用后备源候选值")
             elif st["status"] == "unverified":
                 reasons.append(f"{label} 未核验")
         p["_metric_states"] = states
         p["_missing"] = reasons
-        if reasons:
+        if any(states[k]["status"] in ("missing", "mismatch") for k in REQUIRED_METRICS):
             p["composite_score"] = None
         else:
             p["composite_score"] = round(
@@ -671,8 +680,14 @@ def generate_excel(models_data=None, output_path=None, scope="all", company=None
 
     ws1.merge_cells("A2:N2")
     incomplete_note = ""
-    if incomplete:
-        incomplete_note = f" | {len(incomplete)} 个模型 BenchMark 未完全核验或数据不完整，未参与综合排名（⚠=未核验/核验冲突）"
+    warn_n = sum(1 for p in ordered if p["composite_score"] is not None and p["_missing"])
+    if incomplete or warn_n:
+        parts = []
+        if incomplete:
+            parts.append(f"{len(incomplete)} 个模型数据冲突/缺失未参与排名")
+        if warn_n:
+            parts.append(f"{warn_n} 个模型含 ⚠ 未核验/后备值分数（排名仅供参考）")
+        incomplete_note = " | " + "；".join(parts)
     ws1["A2"] = (
         f"跟踪范围：{scope_label} | 生成时间：{now.strftime('%Y-%m-%d %H:%M:%S')}"
         f"{incomplete_note} | 评分来源列放置于得分列后，仅数字带直链"
@@ -721,6 +736,8 @@ def generate_excel(models_data=None, output_path=None, scope="all", company=None
         if not complete:
             causes = "、".join(m["_missing"])
             notes = f"【未参与综合排名：{causes}】{notes}"
+        elif m["_missing"]:
+            notes = f"{notes}〔⚠ {'、'.join(m['_missing'])}〕"
 
         g_state = m["_metric_states"]["gpqa"]
         s_state = m["_metric_states"]["swe_verified"]
@@ -792,7 +809,7 @@ def generate_excel(models_data=None, output_path=None, scope="all", company=None
                 elif st["status"] == "mismatch":
                     cell.number_format = '0.0%"⚠"'
                     cell.font = font_warn_bad
-                else:
+                else:  # unverified / fallback
                     cell.number_format = '0.0%"⚠"'
                     cell.font = font_warn
             elif col_idx == 10:  # SWE-bench Verified
