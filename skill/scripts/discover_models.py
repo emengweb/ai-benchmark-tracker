@@ -150,6 +150,28 @@ def per_million(price_str):
         return None
 
 
+def derive_attribute(name):
+    """从模型名称推导定位属性（与基线属性列同一内容形式：定位描述词）。
+
+    注意：多模态/免费/商用不进属性列——工作簿已有"是否多模态"与"参考定价"
+    专列，属性列只承载其他列表达不了的定位信息（如基线的"全尺寸旗舰""高吞吐 MoE"）。
+    目录元数据推不出的定位（开源权重/端云结合等）不编造，回退"通用"。
+    """
+    low = str(name or "").lower()
+    tier = None
+    if re.search(r"(?:^|[^a-z])(?:pro|max|ultra|flagship|large|plus)(?:[^a-z]|$)", low):
+        tier = "旗舰"
+    elif re.search(r"(?:^|[^a-z])(?:flash|mini|lite|turbo|nano|small|tiny|air)(?:[^a-z]|$)|\d(?:\.\d+)?b(?:[^a-z]|$)", low):
+        tier = "轻量"
+    purpose = None
+    if re.search(r"(?:^|[^a-z])(?:mt|translate|translation)(?:[^a-z]|$)", low):
+        purpose = "翻译"
+    elif re.search(r"preview|experimental", low) or re.search(r"(?:^|[^a-z])exp(?:[^a-z]|$)", low):
+        purpose = "预览"
+    bits = [b for b in (tier, purpose) if b]
+    return "".join(bits) if bits else "通用"
+
+
 def normalize_catalog_entry(entry, fetched_at):
     mid = entry.get("id", "")
     base_id = mid.split(":")[0]
@@ -185,15 +207,9 @@ def normalize_catalog_entry(entry, fetched_at):
     region, key = classify_institution(provider_slug)
     institution = institution_display(key, fallback=provider_slug or "未知机构")
 
-    # 属性按目录元数据生成（多模态/免费/商用），避免笼统的"运行时发现"
-    attr_bits = []
-    if multimodal:
-        attr_bits.append("多模态")
-    if (price_in or 0) == 0 and (price_out or 0) == 0:
-        attr_bits.append("免费")
-    else:
-        attr_bits.append("商用")
-    attribute = "/".join(attr_bits) or "目录模型"
+    # 属性：从名称推导定位描述（旗舰/轻量/预览/翻译），形式与基线属性列一致；
+    # 多模态/定价信息由专列承载，不在属性列重复
+    attribute = derive_attribute(name)
 
     ctx_text = f"{ctx:,}" if ctx else "未知"
     mod_text = "/".join(sorted(mods)) if mods else "text"

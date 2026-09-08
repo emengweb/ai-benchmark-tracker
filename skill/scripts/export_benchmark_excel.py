@@ -379,32 +379,64 @@ def load_or_init_registry(registry_path=DEFAULT_REGISTRY_PATH):
     return normalize_records(DEFAULT_MODELS)
 
 
+def canonical_model_key(name):
+    """同实体归并键：同模型的不同日期检查点/括号后缀/rolling 别名视为一个实体。
+
+    例：GLM-5.3 == GLM 5.3；Qwen3.8 Max (0902) == Qwen 3.8 Max；
+    DeepSeek V4 Flash 0731 == DeepSeek V4 Flash。而 GPT-6 Astra Pro 与
+    GPT-6 Astra、GLM-5.3 与 GLM-5.3-Flash 仍是不同实体，不会被归并。
+    """
+    s = str(name or "").strip().lower()
+    s = re.sub(r"\([^)]*\)\s*$", "", s)            # 尾部括号（日期/变体说明）
+    s = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", s)  # 去空白/连字符/点等
+    s = re.sub(r"\d{4}$", "", s)                   # 尾部日期检查点（0731/0902）
+    s = re.sub(r"latest$", "", s)                  # OpenRouter rolling 别名
+    return s
+
+
 def update_registry_with_new_models(new_models_list, registry_path=DEFAULT_REGISTRY_PATH):
     current = load_or_init_registry(registry_path)
-    # 合并键：完整规范化模型名（不再是首词），避免同公司不同型号相互覆盖
+    # 合并键：完整规范化模型名 + 同实体归并键，避免同公司不同型号相互覆盖，
+    # 也避免"GLM 5.3"这类同名异写把同一模型录入两次
     existing = {m["name"].strip().lower(): m for m in current}
+    existing_canon = {}
+    for m in current:
+        ck = canonical_model_key(m["name"])
+        if not ck:
+            continue
+        prev = existing_canon.get(ck)
+        # 同键优先保留人工基线记录（无 discovered_via）
+        if prev is None or (prev.get("discovered_via") and not m.get("discovered_via")):
+            existing_canon[ck] = m
 
-    # 人工维护字段：同名更新时保留旧记录的值，防止 discover 元数据覆盖基线
-    # 的 notes/source_url/脚注与指标链接（OpenRouter 目录页不含这些人工信息）
-    protected = {"notes", "source_url", "footnote_tag", "gpqa_tag", "gpqa_url",
-                 "swe_tag", "swe_url", "mmlu_tag", "mmlu_url", "attribute"}
+    # 发现流程带来的目录元数据只允许"填补空缺字段"，绝不覆盖既有值
+    # （基线的机构/属性/多模态/发布月/价格/备注/来源/脚注/核验记录都是人工维护的）
+    fill_only = {"notes", "source_url", "footnote_tag", "gpqa_tag", "gpqa_url",
+                 "swe_tag", "swe_url", "mmlu_tag", "mmlu_url", "attribute",
+                 "institution", "region", "multimodal", "release_date",
+                 "price_input", "price_output", "verification"}
 
     changed = False
     for nm in new_models_list:
         nm = normalize_records([dict(nm)])[0]
         key = nm["name"].strip().lower()
-        if key in existing:
-            old = existing[key]
+        old = existing.get(key) or existing_canon.get(canonical_model_key(nm["name"]))
+        if old is not None:
             for k, v in nm.items():
                 if v is None:
                     continue
-                if k in protected and old.get(k):
-                    continue  # 保留基线人工字段
+                if k in fill_only and old.get(k) is not None:
+                    continue  # 既有值人工/历史优先，仅补空
+                if k == "name" or old.get(k) == v:
+                    continue
                 old[k] = v
             changed = True
         else:
             current.append(nm)
             existing[key] = nm
+            ck = canonical_model_key(nm["name"])
+            if ck:
+                existing_canon[ck] = nm
             changed = True
 
     if changed:
@@ -442,7 +474,8 @@ def metric_state(m, key):
       unverified  有声称值但未核验 -> 参与排名，⚠ 灰色标注
       fallback    无声称值但有后备源候选值 -> 参与排名，⚠ 灰色标注（备注来源）
       mismatch    来源值与声称值冲突（展示 verified_value，需人工复核）-> 不参与排名
-      missing     无任何可用值 -> 显示 —，不参与排名
+      missing     来源页未能核验到数值：有声称值/后备值时仍以 ⚠ 参与排名（来源页
+                  无数值≠声称值有误，直接踢出排名会丢掉真实数据）；两者皆无才显示 —
     """
     vm = metric_verification(m, key)
     st = vm.get("status", "unverified")
@@ -461,6 +494,8 @@ def metric_state(m, key):
     if st == "missing":
         if fb is not None:
             return {"value": fb, "status": "fallback", "qualified": True}
+        if claimed is not None:
+            return {"value": claimed, "status": "unverified", "qualified": True}
         return {"value": None, "status": "missing", "qualified": False}
     # unverified / legacy：有声称值用声称值，否则用后备值
     if claimed is not None:
@@ -594,6 +629,15 @@ def build_footnotes(ordered_models):
     return footnotes
 
 
+def short_org(institution):
+    """机构显示名规整：只剥离规范化名称尾部的英文括注（深度求索 (DeepSeek) -> 深度求索）。
+
+    中文括注（如 InclusionAI (蚂蚁集团)）是有效信息，保留；仅影响榜单展示，
+    不改动注册表数据。
+    """
+    return re.sub(r"\s*\([A-Za-z0-9 .&/+-]+\)\s*$", "", str(institution or "")).strip()
+
+
 def generate_excel(models_data=None, output_path=None, scope="all", company=None):
     if models_data is None:
         models_data = load_or_init_registry()
@@ -605,13 +649,19 @@ def generate_excel(models_data=None, output_path=None, scope="all", company=None
 
     ranked = [p for p in prepared if p["composite_score"] is not None]
     incomplete = [p for p in prepared if p["composite_score"] is None]
+    # 部分缺值（至少一项有声称/后备值）-> 主榜尾部未排名展示；
+    # 完全无数值（纯新发现、跑分待采集）-> 移入"新发现待核验"工作表，避免主榜全是"—"
+    scoreless = [p for p in incomplete
+                 if all(p["_metric_states"][k]["value"] is None for k in REQUIRED_METRICS)]
+    partial = [p for p in incomplete
+               if any(p["_metric_states"][k]["value"] is not None for k in REQUIRED_METRICS)]
     ranked.sort(key=lambda x: x["composite_score"], reverse=True)
-    incomplete.sort(key=lambda x: (len(x["_missing"]), x.get("name", "")))
+    partial.sort(key=lambda x: (len(x["_missing"]), x.get("name", "")))
     for idx, p in enumerate(ranked, 1):
         p["rank"] = idx
-    for p in incomplete:
+    for p in partial:
         p["rank"] = None
-    ordered = ranked + incomplete
+    ordered = ranked + partial
 
     now = datetime.now()
     timestamp_str = now.strftime("%Y%m%d_%H%M%S")
@@ -681,12 +731,14 @@ def generate_excel(models_data=None, output_path=None, scope="all", company=None
     ws1.merge_cells("A2:N2")
     incomplete_note = ""
     warn_n = sum(1 for p in ordered if p["composite_score"] is not None and p["_missing"])
-    if incomplete or warn_n:
+    if partial or warn_n or scoreless:
         parts = []
-        if incomplete:
-            parts.append(f"{len(incomplete)} 个模型数据冲突/缺失未参与排名")
+        if partial:
+            parts.append(f"{len(partial)} 个模型数据冲突/缺失未参与排名")
         if warn_n:
             parts.append(f"{warn_n} 个模型含 ⚠ 未核验/后备值分数（排名仅供参考）")
+        if scoreless:
+            parts.append(f"{len(scoreless)} 个新发现模型跑分待核验（见「新发现待核验」表）")
         incomplete_note = " | " + "；".join(parts)
     ws1["A2"] = (
         f"跟踪范围：{scope_label} | 生成时间：{now.strftime('%Y-%m-%d %H:%M:%S')}"
@@ -750,7 +802,7 @@ def generate_excel(models_data=None, output_path=None, scope="all", company=None
         row_data = [
             m["rank"] if complete else "—",
             model_name_clean,
-            m.get("institution") or "未知机构",
+            short_org(m.get("institution")) or "未知机构",
             m.get("attribute") or "—",
             multimodal_str,
             m.get("release_date") or "—",
@@ -904,7 +956,7 @@ def generate_excel(models_data=None, output_path=None, scope="all", company=None
             c.font = font_cell
             c.alignment = align_left if col_idx > 1 else align_center
     ws2.append([])
-    ws2.append(["综合得分公式", "GPQA Diamond × 0.40 + SWE-bench Verified × 0.35 + MMLU-Pro × 0.25", "", "仅三项分数均核验通过（ok）且完整时参与综合排名；未核验/核验冲突/缺项模型不占排名"])
+    ws2.append(["综合得分公式", "GPQA Diamond × 0.40 + SWE-bench Verified × 0.35 + MMLU-Pro × 0.25", "", "三项均有可用值（核验 ok / 未核验声称值 / 后备源候选值）即参与综合排名，未核验项以 ⚠ 标注；核验冲突（mismatch）与完全无数值不占排名"])
     for col_idx in range(1, 5):
         c = ws2.cell(row=ws2.max_row, column=col_idx)
         c.font = font_bold_cell
@@ -948,9 +1000,51 @@ def generate_excel(models_data=None, output_path=None, scope="all", company=None
     ws3.column_dimensions['C'].width = 45
     ws3.column_dimensions['D'].width = 35
 
+    # Sheet 4: 新发现待核验（完全无分数的运行时发现模型，不挤占主榜）
+    if scoreless:
+        ws4 = wb.create_sheet(title="新发现待核验")
+        ws4.append(["模型名称", "所属机构", "属性", "是否多模态", "发布年月",
+                    "发现渠道", "来源链接", "备注"])
+        ws4.row_dimensions[1].height = 25
+        for col_idx in range(1, 9):
+            cell = ws4.cell(row=1, column=col_idx)
+            cell.font = font_header
+            cell.fill = fill_header
+            cell.alignment = align_center
+        for m in scoreless:
+            dv = m.get("discovered_via") or {}
+            channel = dv.get("source") or "运行时发现"
+            url = m.get("source_url") or ""
+            row4 = [
+                m.get("name", ""),
+                short_org(m.get("institution")) or "未知机构",
+                m.get("attribute") or "通用",
+                "✅ 是" if m.get("multimodal") is True else ("❌ 否" if m.get("multimodal") is False else "—"),
+                m.get("release_date") or "—",
+                channel,
+                f'=HYPERLINK("{url}", "打开来源")' if url else "—",
+                m.get("notes") or "",
+            ]
+            ws4.append(row4)
+            r = ws4.max_row
+            for col_idx in range(1, 9):
+                c = ws4.cell(row=r, column=col_idx)
+                c.border = thin_border
+                c.font = font_cell
+                c.alignment = align_left if col_idx in (1, 2, 8) else align_center
+        ws4.column_dimensions['A'].width = 26
+        ws4.column_dimensions['B'].width = 20
+        ws4.column_dimensions['C'].width = 12
+        ws4.column_dimensions['D'].width = 12
+        ws4.column_dimensions['E'].width = 12
+        ws4.column_dimensions['F'].width = 24
+        ws4.column_dimensions['G'].width = 14
+        ws4.column_dimensions['H'].width = 55
+
     wb.save(output_path)
     print(f"OUTPUT_PATH:{output_path}")
-    print(f"MODELS_INCLUDED:{len(ordered)} (ranked={len(ranked)}, incomplete={len(incomplete)})")
+    print(f"MODELS_INCLUDED:{len(ordered)} (ranked={len(ranked)}, partial={len(partial)}, "
+          f"pending_sheet={len(scoreless)})")
     return output_path
 
 

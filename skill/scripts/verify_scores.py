@@ -25,12 +25,15 @@ import json
 import os
 import re
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 from discover_models import http_get
 from export_benchmark_excel import DEFAULT_REGISTRY_PATH, load_or_init_registry, REQUIRED_METRICS
 
 CACHE_DIR = os.path.join(os.getcwd(), ".verify_cache")
+MAX_WORKERS = 6  # 并发上限（模型级并行），避免外部源限流时整体退化成串行慢速
 
 METRIC_HINTS = {
     "gpqa": ["GPQA Diamond", "GPQA-D", "GPQA Graduate-Level", "GPQA", "GQA"],
@@ -75,7 +78,7 @@ def fetch_body(url, fresh=False):
     path = os.path.join(CACHE_DIR, key + ".html")
     if not fresh and os.path.exists(path):
         return open(path, encoding="utf-8").read(), "cached"
-    body, err = http_get(url, timeout=30, retries=3)
+    body, err = http_get(url, timeout=20, retries=2)
     if body is None:
         return "", f"unreachable:{err}"
     try:
@@ -382,6 +385,8 @@ def main():
     ap.add_argument("--fallback", action="store_true",
                     help="核验后从后备评分源拉取候选值（人工复核用，不自动升级 ok）")
     ap.add_argument("--without", default=None, help="逗号分隔的后备源适配器名，跳过")
+    ap.add_argument("--workers", type=int, default=MAX_WORKERS,
+                    help=f"模型级并发数（默认 {MAX_WORKERS}，上限 6）")
     args = ap.parse_args()
 
     registry = load_or_init_registry(args.registry)
@@ -389,23 +394,28 @@ def main():
     if not models:
         print(f"ERROR: 未找到模型 {args.model}", file=sys.stderr)
         sys.exit(2)
+    workers = max(1, min(args.workers, MAX_WORKERS, len(models)))
 
     summary = {"ok": 0, "mismatch": 0, "missing": 0, "unverifiable": 0}
     report = {"checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "models": {}}
     pending = []
+    t0 = time.time()
 
-    for m in models:
-        print(f"== 核验 {m['name']} ({m['institution']})")
-        results = verify_model(m, fresh=args.fresh)
-        write_back(m, results)
-        report["models"][m["name"]] = results
+    def _verify_one(m):
+        """线程内完成抓取+判定+写回（各模型字典相互独立）；返回缓冲的输出行。"""
+        lines = [f"== 核验 {m['name']} ({m['institution']})"]
+        res = verify_model(m, fresh=args.fresh)
+        write_back(m, res)
         line = []
         for key in REQUIRED_METRICS:
-            r = results[key]
+            r = res[key]
             st = r["status"]
-            summary[st if st in summary else "unverifiable"] += 1
             v = r.get("verified_value", r.get("value"))
-            line.append(f"  {key}={st}{f'({v})' if v is not None else ''}")
+            reason = r.get("reason") or ""
+            seg = f"  {key}={st}{f'({v})' if v is not None else ''}"
+            if st in ("missing", "unverifiable") and reason:
+                seg += f" [{reason}]"
+            line.append(seg)
             if st != "ok":
                 pending.append({
                     "model": m["name"], "metric": REQUIRED_METRICS[key],
@@ -413,8 +423,24 @@ def main():
                     "source_url": r.get("source_url"),
                     "reason": r.get("reason") or r.get("evidence", "")[:120] or st,
                 })
-        print(" |".join(line))
-        print(f"  overall: {m.get('verification', {}).get('status')}")
+            summary[st if st in summary else "unverifiable"] += 1
+        lines.append(" |".join(line))
+        lines.append(f"  overall: {m.get('verification', {}).get('status')}")
+        return m["name"], res, lines
+
+    # 模型级并行（≤6 线程）：抓取慢/限流源时整体耗时 ≈ 最慢一批，而非全部之和
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {ex.submit(_verify_one, m): m for m in models}
+        for fut in as_completed(futures):
+            m = futures[fut]
+            try:
+                name, res, lines = fut.result()
+            except Exception as e:
+                print(f"== 核验 {m['name']} 线程异常: {e}", file=sys.stderr)
+                continue
+            report["models"][name] = res
+            print("\n".join(lines))
+    print(f"\n核验阶段耗时: {time.time() - t0:.1f}s（{len(models)} 模型 x {workers} 并发）")
 
     fallback_hits = 0
     if args.fallback:
@@ -423,6 +449,7 @@ def main():
         pending.extend(extra_pending)
         for st in src_statuses:
             print(f"  [fallback:{st.get('status')}] {st.get('source')} {st.get('error', '')}")
+    print(f"总耗时（含后备源）: {time.time() - t0:.1f}s")
 
     with open(args.report, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)

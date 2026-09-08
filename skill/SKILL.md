@@ -129,11 +129,14 @@ The Excel sheet columns MUST strictly follow this exact order:
 
 ## Data Completeness & Honesty Rules
 
-- 综合得分仅在 GPQA Diamond、SWE-bench Verified、MMLU-Pro **三项分数都通过自动核验（status=ok）且数值有效**时才计算；未核验（unverified）/ 核验冲突（mismatch）/ 缺项（missing）的分数在表格中显示 `—` 或 `数值⚠`（斜体），模型标注具体原因且**不参与综合排名**（排名从 1 只覆盖核验通过的记录）。
-- 分数核验由 `verify_scores.py` 完成：抓取来源页 → 结构化提取（Score 行 / aria-label / data-target 计数器 / JSON-LD）→ 排除 "Best verified" 参考行 → "模型+指标+数值"三元组比对；结果写回注册表 `verification` 字段，报告输出 `score_verification_report.json`（含证据摘录）与 `verify_pending.json`（人工复核队列）。
+- 排名资格：GPQA Diamond、SWE-bench Verified、MMLU-Pro 三项均有**可用值**（核验 ok / 未核验但有声称值 / 后备源候选值）即计算加权综合得分并参与排名；未核验项在单元格以 `数值⚠`（斜体）呈现并在备注注明。仅两类情况不参与排名：**核验冲突（mismatch，来源值与声称值不一致，需人工复核）** 与 **完全无数值（显示 `—`）**。来源页"未能核验到数值"不等于声称值有误，不允许因此把有声称值的模型踢出排名。
+- 完全无数值的运行时新发现模型不挤占主榜，统一进入第 4 张工作表「新发现待核验」（含机构/属性/发布月/发现渠道/来源链接），拿到分数后自动回到主榜。
+- `属性` 列承载定位描述（与基线一致的形式：全尺寸旗舰 / 开源权重 / 高吞吐 MoE / 端云结合…）；运行时发现的模型从模型名推导定位词（旗舰 / 轻量 / 预览 / 翻译），推不出时标 `通用`。多模态、定价信息由专列承载，**禁止**在属性列重复写"多模态/商用/免费"。
+- 分数核验由 `verify_scores.py` 完成：抓取来源页 → 结构化提取（Score 行 / aria-label / data-target 计数器 / JSON-LD）→ 排除 "Best verified" 参考行 → "模型+指标+数值"三元组比对；结果写回注册表 `verification` 字段，报告输出 `score_verification_report.json`（含证据摘录）与 `verify_pending.json`（人工复核队列）。核验与后备源均采用 ≤6 线程并发 + 每请求超时 + 页面缓存（24h），全量核验通常 2 分钟内完成。
 - **禁止**用 SWE-bench Pro、Artificial Analysis Intelligence/Coding Index、Arena Elo 等代理指标顶替或换算这三个基准分。
 - 聚合站（benchlm/vals 等）上 "Provider exact / 官方报告" 行才是模型自身分数，"Best verified" 参考行属于其他模型的最优成绩，禁止取用。
 - 同一指标在同页存在多个标签化观察值时全部记录（`alt_values`），供人工复核；分数必须有可核验来源并记录来源 URL 与核验时间，网络/动态页面不可获取时如实报告并标记 unverified，绝不编造数据。
+- 注册表出现基线字段被覆盖、同名异写重复（GLM 5.3 vs GLM-5.3）、属性列被写成目录标签等历史退化时，运行 `python <skill_dir>/scripts/registry_maintenance.py`（预演）→ `--apply`（写回，自动备份）修复。
 
 ## Dynamic Runtime Model Discovery Workflow
 

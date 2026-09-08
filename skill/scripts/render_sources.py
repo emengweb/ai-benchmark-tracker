@@ -27,10 +27,12 @@ import os
 import re
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 RENDER_JS = os.path.join(SCRIPT_DIR, "render_page.cjs")
+MAX_RENDER_WORKERS = 6  # 渲染源并发上限（每源独立浏览器/子进程，互不阻塞）
 
 RENDER_SOURCES = {
     "swebench": {
@@ -236,20 +238,25 @@ def fetch_source(name, cfg, models):
 
 
 def fetch_all(models=None, sources=None):
-    """遍历渲染源；单源失败不影响其他。"""
+    """并发遍历渲染源（≤MAX_RENDER_WORKERS）；单源失败不影响其他。"""
     all_obs, statuses = [], []
     names = [s for s in sources] if sources else list(RENDER_SOURCES)
-    for name in names:
+
+    def _safe(name):
         cfg = RENDER_SOURCES.get(name)
         if not cfg:
-            statuses.append({"source": name, "status": "unknown_source"})
-            continue
+            return [], {"source": name, "status": "unknown_source"}
         try:
-            obs, st = fetch_source(name, cfg, models)
+            return fetch_source(name, cfg, models)
         except Exception as e:
-            obs, st = [], {"source": name, "status": "error", "error": str(e)}
-        statuses.append(st)
-        all_obs.extend(obs)
+            return [], {"source": name, "status": "error", "error": str(e)}
+
+    with ThreadPoolExecutor(max_workers=max(1, min(MAX_RENDER_WORKERS, len(names) or 1))) as ex:
+        futures = {ex.submit(_safe, name): name for name in names}
+        for fut in as_completed(futures):
+            obs, st = fut.result()
+            statuses.append(st)
+            all_obs.extend(obs)
     return all_obs, statuses
 
 

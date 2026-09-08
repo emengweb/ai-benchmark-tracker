@@ -26,12 +26,15 @@ source_type / source_url / fetched_at / notes。每个适配器独立失败隔�
 结果附带 status 摘要（ok / unavailable / not_found / redirect ...）。
 """
 import argparse
+import hashlib
 import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 from discover_models import http_get
@@ -39,6 +42,31 @@ from discover_models import http_get
 CACHE_DIR = os.path.join(os.getcwd(), ".verify_cache")
 OPENROUTER_MODELS_API = "https://openrouter.ai/api/v1/models"
 SOURCE_TYPES = {"artificial_analysis": "aggregator", "openrouter_indices": "aux"}
+MAX_WORKERS = 6          # 单适配器并发上限
+PAGE_CACHE_TTL = 86400   # 后备源页面缓存有效期（秒）
+
+
+def _page_cache_get(key):
+    """命中返回 (body, final_url)；过期/缺失返回 None。"""
+    path = os.path.join(CACHE_DIR, f"bs_{key}.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if time.time() - data.get("fetched_at", 0) > PAGE_CACHE_TTL:
+            return None
+        return data.get("body"), data.get("final_url")
+    except Exception:
+        return None
+
+
+def _page_cache_set(key, body, final_url):
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    path = os.path.join(CACHE_DIR, f"bs_{key}.json")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"fetched_at": time.time(), "body": body, "final_url": final_url}, f)
+    except OSError:
+        pass
 
 
 def norm(s):
@@ -111,11 +139,20 @@ def fetch_artificial_analysis(model_name):
 
     防家族页误配：跟随重定向后若最终 URL 的 slug 与请求不一致（如 /models/glm-5-3-flash
     重定向到 /models/glm-5-3），拒绝采用该页数据。
+    成功结果带磁盘缓存（24h TTL，并发运行与重跑不重复抓取）。
     返回 (observations, status)。
     """
     slug = aa_slug(model_name)
     url = f"https://artificialanalysis.ai/models/{slug}"
-    body, final_url, err = _get_with_final(url)
+    key = hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
+    cached = _page_cache_get(key)
+    if cached is not None:
+        body, final_url = cached
+        err = None
+    else:
+        body, final_url, err = _get_with_final(url)
+        if body is not None and err is None:
+            _page_cache_set(key, body, final_url)
     if body is None:
         return [], {"source": "artificial_analysis", "model": model_name, "status": "unavailable",
                     "error": err, "url": url}
@@ -185,11 +222,23 @@ ADAPTERS = {
 
 
 def _batch(models, fn):
-    obs, statuses = [], []
-    for m in models:
-        o, st = fn(m)
-        obs.extend(o)
-        statuses.append(st)
+    """逐模型并发抓取（≤MAX_WORKERS 线程）；单模型异常隔离为 error 状态。"""
+    obs, statuses = [], [None] * len(models)
+
+    def _safe(m):
+        try:
+            o, st = fn(m)
+            return o, st
+        except Exception as e:
+            return [], {"status": "error", "error": str(e)}
+
+    with ThreadPoolExecutor(max_workers=max(1, min(MAX_WORKERS, len(models) or 1))) as ex:
+        futures = {ex.submit(_safe, m): i for i, m in enumerate(models)}
+        for fut in as_completed(futures):
+            i = futures[fut]
+            o, st = fut.result()
+            obs.extend(o)
+            statuses[i] = st
     return obs, {"source": fn.__name__, "status": "ok" if obs else "no_data",
                  "per_model": statuses}
 

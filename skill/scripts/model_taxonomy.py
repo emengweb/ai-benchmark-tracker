@@ -23,6 +23,7 @@ INSTITUTION_RULES = [
     ("baichuan",  "domestic",      "百川智能 (Baichuan)",        ["baichuan", "百川"]),
     ("iflytek",   "domestic",      "讯飞星火 (iFlytek)",         ["iflytek", "讯飞"]),
     ("sensetime", "domestic",      "商汤 (SenseTime)",           ["sensetime", "商汤"]),
+    ("inclusionai","domestic",     "InclusionAI (蚂蚁集团)",     ["inclusionai", "antling"]),
     # ---- international（海外机构）----
     ("openai",    "international", "OpenAI",                     ["openai"]),
     ("anthropic", "international", "Anthropic",                  ["anthropic", "claude"]),
@@ -36,6 +37,8 @@ INSTITUTION_RULES = [
     ("amazon",    "international", "Amazon",                     ["amazon", "aws"]),
     ("poolside",  "international", "Poolside",                   ["poolside"]),
     ("upstage",   "international", "Upstage",                    ["upstage"]),
+    ("ibm",       "international", "IBM",                        ["ibm-granite", "ibm"]),
+    ("inception", "international", "Inception Labs",             ["inception"]),
 ]
 
 VALID_REGIONS = {"domestic", "international", "unknown"}

@@ -6,11 +6,11 @@
 
 - **范围识别**：自动按用户措辞识别目标范围。`国内/国产/中国` → 仅国内机构（深度求索、智谱、月之暗面、腾讯混元、阿里云通义、MiniMax、小米、百度、字节、阶跃、零一、百川、讯飞、商汤等）；`国际/海外` → 仅海外机构；指定公司名（OpenAI / DeepSeek / 智谱 / 腾讯……）→ 按公司过滤；`国内外/全球/未限定` → 全部。地域按公司/机构信息（中英文别名 + OpenRouter provider slug）自动归类，未识别机构标为 unknown、不会漏进国内/国际范围；
 - **运行时发现**：以 OpenRouter 公开模型目录 API（`https://openrouter.ai/api/v1/models`）为主源，实时发现并按时效/热度排序模型（月榜页 `https://openrouter.ai/rankings?view=month` 作尽力而为的热度启发，失败自动回退“最新发布优先”），网络故障自动降级到本地缓存，绝不编造模型；内置 18 个模型基线仅作无网络兜底；
-- **诚实评分**：综合得分 = GPQA Diamond × 40% + SWE-bench Verified × 35% + MMLU-Pro × 25%，**仅在三项分数全部通过自动核验（ok）且有效**时计算并参与排名；未核验/核验冲突/缺项的分数显示 `—` 或 `数值⚠`（斜体）并标注原因，不占排名；禁止用 SWE-bench Pro、AI 指数等代理指标顶替三项基准；
+- **诚实评分**：综合得分 = GPQA Diamond × 40% + SWE-bench Verified × 35% + MMLU-Pro × 25%，三项均有可用值（核验 ok / 未核验声称值 / 后备源候选值）即参与排名，未核验项以 `数值⚠` 标注；仅核验冲突（mismatch）与完全无数值（`—`）不占排名；来源页"未能核验到数值"不等于声称值有误，不会把有声称值的模型踢出排名；禁止用 SWE-bench Pro、AI 指数等代理指标顶替三项基准；
 - **自动核验**：`verify_scores.py` 抓取每个分数的声称来源页，结构化提取（Score 行 / aria-label / data-target 计数器 / JSON-LD），排除聚合站 "Best verified" 参考行，做"模型+指标+数值"三元组比对；结果写回注册表 `verification` 字段，输出核验报告（含证据摘录）与人工复核队列 `verify_pending.json`；
 - **后备评分源**：三层兜底——① Artificial Analysis 模型页（GPQA Diamond / MMLU-Pro）；② OpenRouter 目录 AA 三指数（辅助）；③ **渲染型榜单**（Playwright 无头浏览器渲染 swebench.com / OpenCompass 司南 / Scale AI SEAL，解析渲染后表格）。`verify_scores.py --fallback` 自动把后备候选值附到未核验指标（`fallback` 字段 + pending 队列，**不自动升级为 ok**，人工确认后采纳）；单源失败不影响其他源，家族页重定向/名称前缀误配均有守卫；
 - **评分溯源**：“评分来源”列使用下标超链接直指模型评测页，多来源模型（如 Kimi K3 的 [4a]/[4b]）在各分数单元格内分别挂链，模型名称保持纯文本无链接；表格底部溯源索引**随筛选结果动态生成**，国内报表不会出现国际数据源条目；
-- **交付物**：带 `YYYYMMDD_HHMMSS` 时间戳后缀的 .xlsx 工作簿（3 个工作表：天梯榜 / 评测基准说明 / 数据源清单），默认生成在当前工作目录；文件名、标题、副标题、排名范围与溯源索引均随所选范围联动。
+- **交付物**：带 `YYYYMMDD_HHMMSS` 时间戳后缀的 .xlsx 工作簿（3+1 个工作表：天梯榜 / 评测基准说明 / 数据源清单 / 新发现待核验——完全无分数的运行时新发现模型进第 4 表，不挤占主榜），默认生成在当前工作目录；文件名、标题、副标题、排名范围与溯源索引均随所选范围联动。
 
 ## 目录结构
 
@@ -96,7 +96,10 @@ python skill/scripts/export_benchmark_excel.py --scope domestic --output /path/t
 
 - Windows 用 `python`，Linux/macOS 用 `python3`；
 - `--add-model` 合并键为完整模型名；`region` 可选值 domestic/international/unknown，缺省按机构名推断；
-- 只有 GPQA/SWE-bench Verified/MMLU-Pro 三项分数**全部核验通过（ok）**的记录参与综合排名；未核验（`数值⚠` 斜体灰）、核验冲突（`数值⚠` 斜体红）、缺项（`—`）的模型标注原因且不占排名，明细见 `score_verification_report.json`，待人工确认项见 `verify_pending.json`；
+- GPQA/SWE-bench Verified/MMLU-Pro 三项均有可用值（ok / 未核验声称值 / 后备源候选值）的记录参与综合排名，未核验项标 `数值⚠`（斜体灰）；核验冲突（`数值⚠` 斜体红）与完全无数值（`—`）不占排名；完全无分数的新发现模型进「新发现待核验」表。明细见 `score_verification_report.json`，待人工确认项见 `verify_pending.json`；
+- `属性` 列是定位描述（全尺寸旗舰 / 开源权重 / 高吞吐 MoE…），运行时发现的模型按名称推导（旗舰 / 轻量 / 预览 / 翻译，推不出标 `通用`）；多模态与定价有专列，不会在属性列重复；
+- 核验/后备源全链路 ≤6 线程并发 + 每请求超时 + 页面缓存（24h TTL），全量核验通常 2 分钟内；
+- 若注册表出现基线字段被覆盖、同名异写重复等历史退化，运行 `python skill/scripts/registry_maintenance.py` 预演、加 `--apply` 写回（自动备份到 `.zcode/backups/`）；
 - 筛选结果为空时脚本报错退出（exit 2），不会静默导出全量文件。
 
 ## 安装方法
