@@ -1073,8 +1073,8 @@ if __name__ == "__main__":
     if args.add_model:
         try:
             m_obj = json.loads(args.add_model)
-            update_registry_with_new_models([m_obj])
-            print(f"Added/updated model: {m_obj.get('name')}")
+            current = update_registry_with_new_models([m_obj])
+            print(f"Added/updated model: {m_obj.get('name')}（注册表共 {len(current)} 个模型）")
         except Exception as e:
             print(f"Error parsing model JSON: {e}", file=sys.stderr)
 

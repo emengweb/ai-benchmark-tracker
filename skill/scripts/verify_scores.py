@@ -73,15 +73,19 @@ def model_tokens(model):
 
 
 def fetch_body(url, fresh=False):
-    """带磁盘缓存抓取；返回 (body, page_status)。"""
+    """带磁盘缓存抓取；返回 (body, page_status)。每次抓取实时输出一行进度。"""
     os.makedirs(CACHE_DIR, exist_ok=True)
     key = hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
     path = os.path.join(CACHE_DIR, key + ".html")
     if not fresh and os.path.exists(path):
+        print(f"  [fetch] 缓存命中 {url[:90]}", file=sys.stderr)
         return open(path, encoding="utf-8").read(), "cached"
+    t0 = time.time()
     body, err = http_get(url, timeout=20, retries=2)
     if body is None:
+        print(f"  [fetch] 失败({time.time() - t0:.1f}s) {url[:90]} -> {err}", file=sys.stderr)
         return "", f"unreachable:{err}"
+    print(f"  [fetch] 完成({time.time() - t0:.1f}s) {url[:90]} ({len(body) // 1024}KB)", file=sys.stderr)
     try:
         with open(path, "w", encoding="utf-8") as f:
             f.write(body)
@@ -395,6 +399,11 @@ def main():
 
     registry = load_or_init_registry(args.registry)
     all_models = list(registry)
+    if args.model:
+        all_models = [m for m in all_models if m["name"] == args.model]
+        if not all_models:
+            print(f"ERROR: 未找到模型 {args.model}", file=sys.stderr)
+            sys.exit(2)
     if args.company:
         from model_taxonomy import company_aliases, resolve_company_key
         key, _display = resolve_company_key(args.company)
@@ -411,11 +420,11 @@ def main():
 
     # 默认（缓存开启）：已有核验记录的模型直接复用本地永久存储结果，零联网；
     # 只对"没有核验记录的新模型"进行核验取分。--fresh / 显式 --model 时强制重验。
-    use_cache = cache_enabled() and not args.fresh
+    use_cache = cache_enabled() and not args.fresh and not args.model
     models, cached_skipped = [], []
     for m in all_models:
         has_stored = bool(((m.get("verification") or {}).get("metrics") or {}))
-        if use_cache and has_stored and not args.model:
+        if use_cache and has_stored:
             cached_skipped.append(m)
         else:
             models.append(m)
@@ -423,6 +432,8 @@ def main():
     if cached_skipped:
         print(f"[cache] {len(cached_skipped)} 个模型复用本地永久存储的核验结果"
               f"（含评分与来源URL）；需要更新评分时加 --fresh 或提示语『更新最新AI模型评分』")
+    if models:
+        print(f"[待核验 {len(models)} 个] " + ", ".join(m["name"] for m in models))
     if not models:
         print("[cache] 全部模型均为缓存核验状态，本次零联网。")
 
@@ -476,6 +487,7 @@ def main():
         return m["name"], res, lines
 
     # 模型级并行（≤6 线程）：抓取慢/限流源时整体耗时 ≈ 最慢一批，而非全部之和
+    done, total, done_names = 0, len(models), set()
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {ex.submit(_verify_one, m): m for m in models}
         for fut in as_completed(futures):
@@ -484,9 +496,15 @@ def main():
                 name, res, lines = fut.result()
             except Exception as e:
                 print(f"== 核验 {m['name']} 线程异常: {e}", file=sys.stderr)
-                continue
+                name, res, lines = m["name"], {}, []
+            done += 1
+            done_names.add(name)
             report["models"][name] = res
             print("\n".join(lines))
+            remaining = [x["name"] for x in models if x["name"] not in done_names]
+            rem_txt = ", ".join(remaining[:8]) + (f" 等{len(remaining)}个" if len(remaining) > 8 else "")
+            print(f"[进度] 核验完成 {done}/{total}"
+                  + (f"，剩余: {rem_txt}" if remaining else "（全部完成）"))
     print(f"\n核验阶段耗时: {time.time() - t0:.1f}s（{len(models)} 模型 x {workers} 并发）")
 
     fallback_hits = 0

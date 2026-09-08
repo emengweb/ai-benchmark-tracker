@@ -27,6 +27,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
@@ -216,10 +217,14 @@ PARSERS = {"swebench": parse_swebench, "opencompass": parse_opencompass, "scale_
 
 
 def fetch_source(name, cfg, models):
+    print(f"[render] {name} 渲染中: {cfg['url']}（等待 {cfg['wait_ms'] // 1000}s 后解析）")
+    t0 = time.time()
     text, final_url, title, status = render_url(cfg["url"], cfg["wait_ms"])
     if status != "ok":
+        print(f"[render] {name} 失败: {status}（{time.time() - t0:.1f}s）")
         return [], {"source": name, "status": status, "url": cfg["url"]}
     if len(text) < 200:
+        print(f"[render] {name} 空页面（{time.time() - t0:.1f}s）")
         return [], {"source": name, "status": "empty_page", "url": cfg["url"], "title": title}
     parser = PARSERS.get(cfg["parser"], lambda t: [])
     parsed = parser(text)
@@ -234,13 +239,15 @@ def fetch_source(name, cfg, models):
             "source": name, "source_type": cfg["source_type"],
             "source_url": cfg["url"], "notes": cfg["notes"] + f"（{title[:40]}）",
         })
+    print(f"[render] {name} 解析完成（{time.time() - t0:.1f}s）：命中目标模型 {len(obs)}/{len(parsed)} 条")
     return obs, {"source": name, "status": "ok" if obs else "no_model_rows", "url": cfg["url"]}
 
 
 def fetch_all(models=None, sources=None):
-    """并发遍历渲染源（≤MAX_RENDER_WORKERS）；单源失败不影响其他。"""
+    """并发遍历渲染源（≤MAX_RENDER_WORKERS）；单源失败不影响其他。实时输出进度。"""
     all_obs, statuses = [], []
     names = [s for s in sources] if sources else list(RENDER_SOURCES)
+    print(f"[render] 开始并行渲染 {len(names)} 个源（≤{min(MAX_RENDER_WORKERS, len(names) or 1)} 并行）: {', '.join(names)}")
 
     def _safe(name):
         cfg = RENDER_SOURCES.get(name)
@@ -251,12 +258,17 @@ def fetch_all(models=None, sources=None):
         except Exception as e:
             return [], {"source": name, "status": "error", "error": str(e)}
 
+    done = 0
     with ThreadPoolExecutor(max_workers=max(1, min(MAX_RENDER_WORKERS, len(names) or 1))) as ex:
         futures = {ex.submit(_safe, name): name for name in names}
         for fut in as_completed(futures):
             obs, st = fut.result()
             statuses.append(st)
             all_obs.extend(obs)
+            done += 1
+            remaining = [n for n in names if n not in {futures[f] for f in futures if f.done()}]
+            print(f"[render] 进度 {done}/{len(names)} {st.get('source')} -> {st.get('status')}"
+                  + (f"，剩余: {', '.join(remaining)}" if remaining else "（全部完成）"))
     return all_obs, statuses
 
 

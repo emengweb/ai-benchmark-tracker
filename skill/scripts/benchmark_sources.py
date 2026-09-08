@@ -225,8 +225,14 @@ ADAPTERS = {
 
 
 def _batch(models, fn, source=None):
-    """逐模型并发抓取（≤MAX_WORKERS 线程）；单模型异常隔离为 error 状态。"""
+    """逐模型并发抓取（≤MAX_WORKERS 线程）；单模型异常隔离为 error 状态。
+    实时输出进度：开始清单 + 每完成一个报一次（含剩余）。"""
+    label = source or fn.__name__
     obs, statuses = [], [None] * len(models)
+    if not models:
+        return obs, {"source": label, "status": "no_data", "per_model": []}
+    workers = max(1, min(MAX_WORKERS, len(models)))
+    print(f"[{label}] 开始并发抓取 {len(models)} 个模型页（≤{workers} 线程）: {', '.join(models)}")
 
     def _safe(m):
         try:
@@ -235,14 +241,22 @@ def _batch(models, fn, source=None):
         except Exception as e:
             return [], {"status": "error", "error": str(e)}
 
-    with ThreadPoolExecutor(max_workers=max(1, min(MAX_WORKERS, len(models) or 1))) as ex:
+    done, done_names = 0, set()
+    with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {ex.submit(_safe, m): i for i, m in enumerate(models)}
         for fut in as_completed(futures):
             i = futures[fut]
             o, st = fut.result()
             obs.extend(o)
             statuses[i] = st
-    return obs, {"source": source or fn.__name__, "status": "ok" if obs else "no_data",
+            done += 1
+            done_names.add(models[i])
+            remaining = [m for m in models if m not in done_names]
+            rem_txt = ", ".join(remaining[:8]) + (f" 等{len(remaining)}个" if len(remaining) > 8 else "")
+            print(f"[{label}] 进度 {done}/{len(models)} {models[i]} -> {st.get('status')}"
+                  + (f"（{len(o)} 条观测）" if o else "")
+                  + (f"，剩余: {rem_txt}" if remaining else "（全部完成）"))
+    return obs, {"source": label, "status": "ok" if obs else "no_data",
                  "per_model": statuses}
 
 
