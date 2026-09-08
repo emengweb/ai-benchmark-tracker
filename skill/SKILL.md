@@ -227,25 +227,27 @@ python <skill_dir>/scripts/verify_scores.py --fallback                  # 核验
 # 补录一条新发现的模型（region 可省略：脚本按机构自动归类；分数未采集到时省略对应字段）
 python <skill_dir>/scripts/export_benchmark_excel.py --add-model '{"name": "模型名", "institution": "机构", "attribute": "属性", "multimodal": true, "release_date": "2026-09", "gpqa": 90.0, "swe_verified": 85.0, "swe_pro": 60.0, "mmlu_pro": 88.0, "price_input": 1.0, "price_output": 3.0, "notes": "核心特性", "source_url": "https://评测页直链"}'
 
-# 只导出国内（用户要求“国内”时的出口）
+# ⚠️ 以下命令按用户请求"选择其一"执行——不是要逐条运行的清单（见下方单一交付物规则）
+
+# 国内 / 国际
 python <skill_dir>/scripts/export_benchmark_excel.py --scope domestic
 
-# 只导出某公司（可与 --scope 叠加）
+# 指定公司（可与 --scope 叠加）
 python <skill_dir>/scripts/export_benchmark_excel.py --company openai
 python <skill_dir>/scripts/export_benchmark_excel.py --scope domestic --company 智谱
 
-# 全部（默认，兼容旧行为）
+# 全部（用户无地域/公司限制时）
 python <skill_dir>/scripts/export_benchmark_excel.py
-
-# 数据模式标注（写入副标题告知用户）：cache=本地永久存储（默认）/ fresh=本次已联网刷新重验
-python <skill_dir>/scripts/export_benchmark_excel.py --data-mode fresh
 ```
+
+- **单一交付物（硬性规则）**：一次用户请求**只生成一个 xlsx**——先解析用户要求的范围/公司，从上面选择**对应的一条**导出命令执行**一次**。严禁：把示例命令全部跑一遍"演示"；为多个 scope/company 顺手各导一份；核验前后重复导出。仅当用户在请求中明确要求多份不同范围的榜单时，才按其要求分别导出。
+- `--data-mode cache`（默认）/ `--data-mode fresh` 是同一条导出命令上的标注参数，写入副标题告知用户数据模式，不需要为此多导一次。
 
 - 导出器按机构地域自动归类（规则表 `model_taxonomy.py`）；筛选结果为 0 时脚本报错退出，不产出全量文件。
 - 排名只在筛选后的集合内计算并从 1 开始；三项均有可用值（核验 ok / 未核验声称值 / 后备源候选值）的模型参与排名，未核验项标 `数值⚠`；仅核验冲突与完全无数值不占排名（详见"数据完整性与诚实性规则"）。
 - 完全无分数的新发现模型进入第 4 张工作表「新发现待核验」，不挤占主榜。
 - 文件名/表格标题/副标题/底部溯源索引全部随范围联动（例如国内榜：`2026国内主流AI模型综合能力与跑分天梯榜_<YYYYMMDD_HHMMSS>.xlsx`）。
-- 建议流程顺序：`discover_models.py`（目录对比，只处理新增）→ 新模型 `--add-model`（补录）→ `verify_scores.py --fallback`（默认只验新模型）→ 导出（默认 `--data-mode cache`；刷新过则 `--data-mode fresh`）。
+- 建议流程顺序：`discover_models.py`（目录对比，只处理新增）→ 新模型 `--add-model`（补录）→ `verify_scores.py --fallback`（默认只验新模型）→ **最后导出一次**（默认 `--data-mode cache`；本次刷新重验过则 `--data-mode fresh`）。
 
 Formula:
 Composite Score = (GPQA Diamond × 0.40) + (SWE-bench Verified × 0.35) + (MMLU-Pro × 0.25)
