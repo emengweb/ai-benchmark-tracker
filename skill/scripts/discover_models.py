@@ -155,6 +155,13 @@ def normalize_catalog_entry(entry, fetched_at):
     base_id = mid.split(":")[0]
     provider_slug = base_id.split("/")[0] if "/" in base_id else ""
     name = entry.get("name") or base_id
+    # OpenRouter name 常带 "Provider: " 前缀，剥离以避免与基线同名模型重复入库
+    # （前缀与 provider slug 归一比较：Z.ai -> z-ai）
+    if ":" in name:
+        prefix = name.split(":", 1)[0].strip().lower().replace(" ", "-").replace(".", "-")
+        if prefix == provider_slug.lower() or prefix in provider_slug.lower():
+            name = name.split(":", 1)[1].strip()
+    name = name.strip()
     arch = entry.get("architecture") or {}
     in_mods = arch.get("input_modalities") or []
     out_mods = arch.get("output_modalities") or []

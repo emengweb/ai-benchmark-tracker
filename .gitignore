@@ -20,3 +20,6 @@ render_scores.json
 
 # 渲染调试转储
 _*_rendered.txt
+
+# 发现产物
+hot20.json

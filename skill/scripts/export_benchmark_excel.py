@@ -384,13 +384,23 @@ def update_registry_with_new_models(new_models_list, registry_path=DEFAULT_REGIS
     # 合并键：完整规范化模型名（不再是首词），避免同公司不同型号相互覆盖
     existing = {m["name"].strip().lower(): m for m in current}
 
+    # 人工维护字段：同名更新时保留旧记录的值，防止 discover 元数据覆盖基线
+    # 的 notes/source_url/脚注与指标链接（OpenRouter 目录页不含这些人工信息）
+    protected = {"notes", "source_url", "footnote_tag", "gpqa_tag", "gpqa_url",
+                 "swe_tag", "swe_url", "mmlu_tag", "mmlu_url", "attribute"}
+
     changed = False
     for nm in new_models_list:
         nm = normalize_records([dict(nm)])[0]
         key = nm["name"].strip().lower()
         if key in existing:
             old = existing[key]
-            old.update({k: v for k, v in nm.items() if v is not None})
+            for k, v in nm.items():
+                if v is None:
+                    continue
+                if k in protected and old.get(k):
+                    continue  # 保留基线人工字段
+                old[k] = v
             changed = True
         else:
             current.append(nm)
