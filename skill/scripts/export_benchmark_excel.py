@@ -894,7 +894,7 @@ def generate_excel(models_data=None, output_path=None, scope="all", company=None
                     metric_url = metric_source("gpqa", st)
                     if metric_url:
                         cell.value = f'=HYPERLINK("{metric_url}", "{st["value"]:.1f}% {m.get("gpqa_tag", "")}")'
-                        cell.font = font_subscript_link
+                        cell.font = font_link_full
                 elif st["status"] == "mismatch":
                     cell.number_format = '0.0%"⚠"'
                     cell.font = font_warn_bad
@@ -903,7 +903,7 @@ def generate_excel(models_data=None, output_path=None, scope="all", company=None
                     metric_url = metric_source("gpqa", st)
                     if metric_url:
                         cell.value = f'=HYPERLINK("{metric_url}", "{st["value"]:.1f}% ⚠")'
-                        cell.font = font_subscript_link
+                        cell.font = font_link_full
                     else:
                         cell.font = font_warn
             elif col_idx == 10:  # SWE-bench Verified
@@ -916,7 +916,7 @@ def generate_excel(models_data=None, output_path=None, scope="all", company=None
                     metric_url = metric_source("swe_verified", st)
                     if metric_url:
                         cell.value = f'=HYPERLINK("{metric_url}", "{st["value"]:.1f}% {m.get("swe_tag", "")}")'
-                        cell.font = font_subscript_link
+                        cell.font = font_link_full
                 elif st["status"] == "mismatch":
                     cell.number_format = '0.0%"⚠"'
                     cell.font = font_warn_bad
@@ -925,7 +925,7 @@ def generate_excel(models_data=None, output_path=None, scope="all", company=None
                     metric_url = metric_source("swe_verified", st)
                     if metric_url:
                         cell.value = f'=HYPERLINK("{metric_url}", "{st["value"]:.1f}% ⚠")'
-                        cell.font = font_subscript_link
+                        cell.font = font_link_full
                     else:
                         cell.font = font_warn
             elif col_idx == 11:  # SWE-bench Pro（仅展示）
@@ -951,7 +951,7 @@ def generate_excel(models_data=None, output_path=None, scope="all", company=None
                     metric_url = metric_source("mmlu_pro", st)
                     if metric_url:
                         cell.value = f'=HYPERLINK("{metric_url}", "{st["value"]:.1f}% {m.get("mmlu_tag", "")}")'
-                        cell.font = font_subscript_link
+                        cell.font = font_link_full
                 elif st["status"] == "mismatch":
                     cell.number_format = '0.0%"⚠"'
                     cell.font = font_warn_bad
@@ -960,7 +960,7 @@ def generate_excel(models_data=None, output_path=None, scope="all", company=None
                     metric_url = metric_source("mmlu_pro", st)
                     if metric_url:
                         cell.value = f'=HYPERLINK("{metric_url}", "{st["value"]:.1f}% ⚠")'
-                        cell.font = font_subscript_link
+                        cell.font = font_link_full
                     else:
                         cell.font = font_warn
             elif col_idx == 13:  # Pricing
