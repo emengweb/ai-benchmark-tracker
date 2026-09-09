@@ -16,6 +16,7 @@ import re
 import sys
 import json
 import argparse
+import tempfile
 from datetime import datetime
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -24,6 +25,7 @@ from openpyxl.utils import get_column_letter
 from model_taxonomy import (
     resolve_company_key,
     company_aliases,
+    alias_matches,
     normalize_records,
     REGION_LABELS,
 )
@@ -372,11 +374,28 @@ def load_or_init_registry(registry_path=DEFAULT_REGISTRY_PATH):
                 raw = json.load(f)
             if isinstance(raw, list):
                 return normalize_records(raw)
+            raise ValueError("注册表顶层必须是数组")
         except Exception as e:
-            print(f"WARNING: 读取注册表失败（{e}），将重新初始化", file=sys.stderr)
-    with open(registry_path, "w", encoding="utf-8") as f:
-        json.dump(DEFAULT_MODELS, f, ensure_ascii=False, indent=2)
+            # 不覆盖可能因并发写入/截断产生的现有数据，避免静默丢失发现记录与核验结果。
+            raise RuntimeError(f"读取注册表失败（{e}），已拒绝用基线覆盖现有文件") from e
+    _atomic_json_dump(DEFAULT_MODELS, registry_path)
     return normalize_records(DEFAULT_MODELS)
+
+
+def _atomic_json_dump(value, path):
+    """在同一目录先写临时文件，再原子替换 JSON，避免半写文件被并发读到。"""
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix=".json-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(value, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
 def canonical_model_key(name):
@@ -440,8 +459,7 @@ def update_registry_with_new_models(new_models_list, registry_path=DEFAULT_REGIS
             changed = True
 
     if changed:
-        with open(registry_path, "w", encoding="utf-8") as f:
-            json.dump(current, f, ensure_ascii=False, indent=2)
+        _atomic_json_dump(current, registry_path)
     return current
 
 
@@ -554,12 +572,12 @@ def filter_models(models, scope="all", company=None):
             aliases = company_aliases(key)
             selected = [
                 m for m in selected
-                if aliases and any(a in str(m.get("institution", "")).lower() for a in aliases)
+                if aliases and alias_matches(m.get("institution", ""), aliases)
             ]
         else:
             raw = str(company).strip().lower()
             selected = [
-                m for m in selected if raw in str(m.get("institution", "")).lower()
+                m for m in selected if alias_matches(m.get("institution", ""), [raw])
             ]
 
     if not selected:
@@ -790,7 +808,8 @@ def generate_excel(models_data=None, output_path=None, scope="all", company=None
 
         model_name_clean = m["name"].split("[")[0].strip()
         fn_tag = m.get("footnote_tag") or (f"[{m['rank']}]" if m["rank"] else "")
-        fn_formula = f'=HYPERLINK("{m["source_url"]}", "{fn_tag}")' if (m.get("source_url") and fn_tag) else "—"
+        source_url = m.get("source_url") or ""
+        fn_formula = f'=HYPERLINK("{source_url}", "{fn_tag}")' if (source_url and fn_tag) else "—"
 
         notes = m.get("notes") or ""
         if not complete:
@@ -806,6 +825,15 @@ def generate_excel(models_data=None, output_path=None, scope="all", company=None
 
         def cell_val(st):
             return st["value"] / 100.0 if st["value"] is not None else "—"
+
+        def metric_source(metric_key, state):
+            vm = ((m.get("verification") or {}).get("metrics") or {}).get(metric_key) or {}
+            fallback = vm.get("fallback") or {}
+            if state.get("status") == "fallback" and fallback.get("source_url"):
+                return fallback.get("source_url")
+            return (vm.get("source_url") or m.get({
+                "gpqa": "gpqa_url", "swe_verified": "swe_url", "mmlu_pro": "mmlu_url"
+            }.get(metric_key)) or m.get("source_url"))
 
         row_data = [
             m["rank"] if complete else "—",
@@ -863,15 +891,21 @@ def generate_excel(models_data=None, output_path=None, scope="all", company=None
                     cell.font = font_muted
                 elif st["status"] == "ok":
                     cell.number_format = '0.0%'
-                    if "gpqa_url" in m:
-                        cell.value = f'=HYPERLINK("{m["gpqa_url"]}", "{st["value"]:.1f}% {m.get("gpqa_tag", "")}")'
+                    metric_url = metric_source("gpqa", st)
+                    if metric_url:
+                        cell.value = f'=HYPERLINK("{metric_url}", "{st["value"]:.1f}% {m.get("gpqa_tag", "")}")'
                         cell.font = font_subscript_link
                 elif st["status"] == "mismatch":
                     cell.number_format = '0.0%"⚠"'
                     cell.font = font_warn_bad
                 else:  # unverified / fallback
                     cell.number_format = '0.0%"⚠"'
-                    cell.font = font_warn
+                    metric_url = metric_source("gpqa", st)
+                    if metric_url:
+                        cell.value = f'=HYPERLINK("{metric_url}", "{st["value"]:.1f}% ⚠")'
+                        cell.font = font_subscript_link
+                    else:
+                        cell.font = font_warn
             elif col_idx == 10:  # SWE-bench Verified
                 cell.alignment = align_right
                 st = s_state
@@ -879,15 +913,21 @@ def generate_excel(models_data=None, output_path=None, scope="all", company=None
                     cell.font = font_muted
                 elif st["status"] == "ok":
                     cell.number_format = '0.0%'
-                    if "swe_url" in m:
-                        cell.value = f'=HYPERLINK("{m["swe_url"]}", "{st["value"]:.1f}% {m.get("swe_tag", "")}")'
+                    metric_url = metric_source("swe_verified", st)
+                    if metric_url:
+                        cell.value = f'=HYPERLINK("{metric_url}", "{st["value"]:.1f}% {m.get("swe_tag", "")}")'
                         cell.font = font_subscript_link
                 elif st["status"] == "mismatch":
                     cell.number_format = '0.0%"⚠"'
                     cell.font = font_warn_bad
                 else:
                     cell.number_format = '0.0%"⚠"'
-                    cell.font = font_warn
+                    metric_url = metric_source("swe_verified", st)
+                    if metric_url:
+                        cell.value = f'=HYPERLINK("{metric_url}", "{st["value"]:.1f}% ⚠")'
+                        cell.font = font_subscript_link
+                    else:
+                        cell.font = font_warn
             elif col_idx == 11:  # SWE-bench Pro（仅展示）
                 cell.alignment = align_right
                 st = p_state
@@ -908,15 +948,21 @@ def generate_excel(models_data=None, output_path=None, scope="all", company=None
                     cell.font = font_muted
                 elif st["status"] == "ok":
                     cell.number_format = '0.0%'
-                    if "mmlu_url" in m:
-                        cell.value = f'=HYPERLINK("{m["mmlu_url"]}", "{st["value"]:.1f}% {m.get("mmlu_tag", "")}")'
+                    metric_url = metric_source("mmlu_pro", st)
+                    if metric_url:
+                        cell.value = f'=HYPERLINK("{metric_url}", "{st["value"]:.1f}% {m.get("mmlu_tag", "")}")'
                         cell.font = font_subscript_link
                 elif st["status"] == "mismatch":
                     cell.number_format = '0.0%"⚠"'
                     cell.font = font_warn_bad
                 else:
                     cell.number_format = '0.0%"⚠"'
-                    cell.font = font_warn
+                    metric_url = metric_source("mmlu_pro", st)
+                    if metric_url:
+                        cell.value = f'=HYPERLINK("{metric_url}", "{st["value"]:.1f}% ⚠")'
+                        cell.font = font_subscript_link
+                    else:
+                        cell.font = font_warn
             elif col_idx == 13:  # Pricing
                 cell.alignment = align_center
             elif col_idx == 14:  # Notes
@@ -1075,6 +1121,8 @@ def generate_excel(models_data=None, output_path=None, scope="all", company=None
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="AI Benchmark 天梯榜导出器")
     parser.add_argument("--add-model", type=str, help="JSON string representing a new model to add or update")
+    parser.add_argument("--export", action="store_true",
+                        help="与 --add-model 同时使用时，在补录后额外导出一次；默认只更新注册表")
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--scope", type=str, default="all",
                         choices=["all", "domestic", "international"],
@@ -1088,10 +1136,16 @@ if __name__ == "__main__":
     if args.add_model:
         try:
             m_obj = json.loads(args.add_model)
+            if not isinstance(m_obj, dict) or not m_obj.get("name"):
+                raise ValueError("模型 JSON 必须是包含 name 的对象")
             current = update_registry_with_new_models([m_obj])
             print(f"Added/updated model: {m_obj.get('name')}（注册表共 {len(current)} 个模型）")
         except Exception as e:
             print(f"Error parsing model JSON: {e}", file=sys.stderr)
+            sys.exit(2)
+        if not args.export:
+            # 补录是发现/核验流水线中的独立步骤，不能因为示例命令而隐式生成 xlsx。
+            sys.exit(0)
 
     try:
         generate_excel(output_path=args.output, scope=args.scope, company=args.company,

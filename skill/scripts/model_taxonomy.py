@@ -5,6 +5,7 @@
 命中的公司；无法识别时返回 "unknown"，绝不猜测。中英文别名与常见 OpenRouter
 provider slug 一并收录，保证运行时发现的模型也能正确归类。
 """
+import re
 
 # (canonical_key, region, display, [aliases]) —— domestic 规则在前
 INSTITUTION_RULES = [
@@ -62,11 +63,12 @@ REGION_SYNONYMS = {
 def classify_institution(institution):
     """返回 (region, canonical_key)；未识别 => ("unknown", None)。"""
     text = str(institution or "").strip().lower()
-    if not text:
+    if not text or re.search(r"\b(?:compatible|compatibility|api[- ]?compatible)\b", text):
         return "unknown", None
     for key, region, _display, aliases in INSTITUTION_RULES:
         for alias in aliases:
-            if alias in text:
+            alias = alias.lower()
+            if re.search(r"(?<![a-z0-9])" + re.escape(alias) + r"(?![a-z0-9])", text):
                 return region, key
     return "unknown", None
 
@@ -79,8 +81,10 @@ def resolve_company_key(company):
     text = str(company or "").strip().lower()
     if not text:
         return None, None
+    if re.search(r"\b(?:compatible|compatibility|api[- ]?compatible)\b", text):
+        return None, None
     for key, _region, display, aliases in INSTITUTION_RULES:
-        if text == key or any(alias == text or alias in text for alias in aliases):
+        if text == key or alias_matches(text, aliases):
             return key, display
     return None, None
 
@@ -90,6 +94,21 @@ def company_aliases(key):
         if k == key:
             return [a.lower() for a in aliases]
     return []
+
+
+def alias_matches(text, aliases):
+    """按完整 provider/token 边界匹配别名，避免 meta 命中 metadata 等无关文本。"""
+    value = str(text or "").strip().lower()
+    for alias in aliases or []:
+        alias = str(alias).strip().lower()
+        if not alias:
+            continue
+        if re.search(r"(?<![a-z0-9])" + re.escape(alias) + r"(?![a-z0-9])", value):
+            return True
+        # 中文别名没有 ASCII token 边界，允许直接匹配中文机构名。
+        if re.search(r"[\u4e00-\u9fff]", alias) and alias in value:
+            return True
+    return False
 
 
 def institution_display(key, fallback=""):

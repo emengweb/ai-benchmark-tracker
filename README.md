@@ -94,8 +94,10 @@ python skill/scripts/export_benchmark_excel.py                                  
 python skill/scripts/export_benchmark_excel.py --scope all --data-mode fresh         # 标注"本次已联网刷新"
 #    --data-mode cache（默认）在副标题标注"本地永久存储"，fresh 标注"已联网刷新重验"
 
-# 4) 补录新模型并重算排名（region 可省略，按机构自动归类；分数未采集到可省略对应字段）
+# 4) 补录新模型（默认只更新永久注册表，不生成 xlsx；分数未采集到可省略）
 python skill/scripts/export_benchmark_excel.py --add-model '{"name": "模型名", "institution": "机构", "attribute": "属性", "multimodal": true, "release_date": "2026-09", "gpqa": 90.0, "swe_verified": 85.0, "swe_pro": 60.0, "mmlu_pro": 88.0, "price_input": 1.0, "price_output": 3.0, "notes": "核心特性", "source_url": "https://评测页直链"}'
+# 如确实要在补录后同次导出，必须显式追加 --export；通常建议最后单独导出一次
+python skill/scripts/export_benchmark_excel.py --add-model '{"name": "模型名", "institution": "机构"}' --export --scope domestic
 
 # 指定输出路径
 python skill/scripts/export_benchmark_excel.py --scope domestic --output /path/to/report.xlsx

@@ -23,4 +23,8 @@ _*_rendered.txt
 
 # 发现产物
 hot20.json
+discover_result.json
 skill/scripts/openrouter_rankings_hint.json
+
+# 打包产物
+ai-benchmark-tracker.zip

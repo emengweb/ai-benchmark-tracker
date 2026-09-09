@@ -225,6 +225,7 @@ python <skill_dir>/scripts/verify_scores.py --fallback                  # 核验
 
 ```bash
 # 补录一条新发现的模型（region 可省略：脚本按机构自动归类；分数未采集到时省略对应字段）
+# 注意：--add-model 默认只更新永久注册表，不生成 xlsx；只有明确需要同次导出时才追加 --export
 python <skill_dir>/scripts/export_benchmark_excel.py --add-model '{"name": "模型名", "institution": "机构", "attribute": "属性", "multimodal": true, "release_date": "2026-09", "gpqa": 90.0, "swe_verified": 85.0, "swe_pro": 60.0, "mmlu_pro": 88.0, "price_input": 1.0, "price_output": 3.0, "notes": "核心特性", "source_url": "https://评测页直链"}'
 
 # ⚠️ 以下命令按用户请求"选择其一"执行——不是要逐条运行的清单（见下方单一交付物规则）

@@ -37,9 +37,10 @@ from model_taxonomy import (
     resolve_company_key,
     company_aliases,
     institution_display,
+    alias_matches,
 )
 from skill_config import cache_enabled, load_config
-from export_benchmark_excel import canonical_model_key
+from export_benchmark_excel import canonical_model_key, _atomic_json_dump
 
 OPENROUTER_MODELS_API = "https://openrouter.ai/api/v1/models"
 OPENROUTER_RANKINGS_URL = "https://openrouter.ai/rankings?view=month"
@@ -92,8 +93,7 @@ def load_cache():
 
 def save_cache(cache):
     try:
-        with open(CACHE_PATH, "w", encoding="utf-8") as f:
-            json.dump(cache, f, ensure_ascii=False, indent=2)
+        _atomic_json_dump(cache, CACHE_PATH)
     except OSError as e:
         print(f"WARNING: 缓存写入失败: {e}", file=sys.stderr)
 
@@ -301,9 +301,8 @@ def fetch_rankings_hint(valid_refs=None):
 
 def _save_hint(refs, via):
     try:
-        with open(RANKINGS_HINT_PATH, "w", encoding="utf-8") as f:
-            json.dump({"fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                       "via": via, "refs": refs}, f, ensure_ascii=False, indent=2)
+        _atomic_json_dump({"fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                           "via": via, "refs": refs}, RANKINGS_HINT_PATH)
     except OSError:
         pass
 
@@ -415,9 +414,9 @@ def resolve_company_filter(company):
         def match(record):
             slug = str(record.get("discovered_via", {}).get("model_id", "")).split(":")[0].lower()
             inst = str(record.get("institution", "")).lower()
-            if aliases and any(a in slug for a in aliases):
+            if aliases and (alias_matches(slug, aliases) or alias_matches(inst, aliases)):
                 return True
-            return any(a in inst for a in aliases)
+            return False
         return match
     raw = str(company).strip().lower()
     def raw_match(record):
@@ -512,7 +511,15 @@ def main():
             hint = []
             print(f"WARNING: {hint_err}，回退到目录最新发布优先排序", file=sys.stderr)
 
-    slug_of = lambda r: (r.get("discovered_via") or {}).get("model_id", "").split(":")[0].lower()
+    def ranking_keys_of(r):
+        dv = r.get("discovered_via") or {}
+        keys = []
+        base = str(dv.get("model_id", "")).split(":")[0].lower()
+        canonical = str(dv.get("canonical_slug") or "").strip().lower()
+        for key in (base, canonical):
+            if key and key not in keys:
+                keys.append(key)
+        return keys
 
     def created_of(r):
         try:
@@ -524,10 +531,10 @@ def main():
         order = {ref: i for i, ref in enumerate(hint)}
 
         def hot_key(r):
-            o = order.get(slug_of(r))
-            if o is not None:
-                return (0, o, 0.0)          # 月榜热度区内按热度
-            return (1, 0, -created_of(r))   # 超出月榜可见范围：最新发布补充在后
+            positions = [order[key] for key in ranking_keys_of(r) if key in order]
+            if positions:
+                return (0, min(positions), 0.0)  # base id 或 canonical slug 命中月榜
+            return (1, 0, -created_of(r))        # 超出月榜可见范围：最新发布补充在后
 
         raw_records.sort(key=hot_key)
     else:

@@ -30,10 +30,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 from discover_models import http_get
-from export_benchmark_excel import DEFAULT_REGISTRY_PATH, load_or_init_registry, REQUIRED_METRICS
+from export_benchmark_excel import DEFAULT_REGISTRY_PATH, load_or_init_registry, REQUIRED_METRICS, _atomic_json_dump
 from skill_config import cache_enabled
 
 CACHE_DIR = os.path.join(os.getcwd(), ".verify_cache")
+CACHE_TTL = 86400
 MAX_WORKERS = 6  # 并发上限（模型级并行），避免外部源限流时整体退化成串行慢速
 
 METRIC_HINTS = {
@@ -68,8 +69,14 @@ def norm(s):
 
 
 def model_tokens(model):
-    toks = {norm(model["name"]), norm(model["name"].split()[0])}
-    return [t for t in toks if len(t) >= 3]
+    """返回足以确认模型身份的强匹配 token，不使用首个家族词。"""
+    name = norm(model.get("name", ""))
+    tokens = [name] if len(name) >= 6 else []
+    model_id = str((model.get("discovered_via") or {}).get("model_id", ""))
+    model_id = norm(model_id.split(":", 1)[0])
+    if len(model_id) >= 6 and model_id not in tokens:
+        tokens.append(model_id)
+    return tokens
 
 
 def fetch_body(url, fresh=False):
@@ -78,8 +85,13 @@ def fetch_body(url, fresh=False):
     key = hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
     path = os.path.join(CACHE_DIR, key + ".html")
     if not fresh and os.path.exists(path):
-        print(f"  [fetch] 缓存命中 {url[:90]}", file=sys.stderr)
-        return open(path, encoding="utf-8").read(), "cached"
+        try:
+            if time.time() - os.path.getmtime(path) <= CACHE_TTL:
+                print(f"  [fetch] 缓存命中 {url[:90]}", file=sys.stderr)
+                with open(path, encoding="utf-8") as f:
+                    return f.read(), "cached"
+        except OSError:
+            pass
     t0 = time.time()
     body, err = http_get(url, timeout=20, retries=2)
     if body is None:
@@ -257,7 +269,9 @@ def verify_metric(model, key, claimed, url, body, page_status):
 
 def metric_sources(model, key):
     """核验该指标要访问的 URL 列表（主页面 + 指标专属页）。"""
-    urls = [model["source_url"]]
+    urls = []
+    if model.get("source_url"):
+        urls.append(model["source_url"])
     mkey = {"gpqa": "gpqa_url", "swe_verified": "swe_url", "swe_pro": None, "mmlu_pro": "mmlu_url"}[key]
     if mkey and model.get(mkey) and model[mkey] != model.get("source_url"):
         urls.append(model[mkey])
@@ -274,6 +288,14 @@ def verify_model(model, fresh=False):
         if claimed is None:
             results[key] = {"status": "missing", "reason": "注册表未录入该指标", "claimed": None}
             continue
+        try:
+            claimed_f = float(claimed)
+        except (TypeError, ValueError):
+            results[key] = {"status": "missing", "reason": "注册表分数不是数值", "claimed": claimed}
+            continue
+        if not 0 <= claimed_f <= 100:
+            results[key] = {"status": "missing", "reason": "注册表分数超出 0-100 范围", "claimed": claimed}
+            continue
         combined = []
         for url in metric_sources(model, key):
             if url not in body_cache:
@@ -281,14 +303,21 @@ def verify_model(model, fresh=False):
                 pages[url] = page_status
             r = verify_metric(model, key, claimed, url, body_cache[url], pages[url])
             combined.append((url, r))
-        ok = [c for _, c in combined if c["status"] == "ok"]
-        mismatch = [c for _, c in combined if c["status"] == "mismatch"]
+        if not combined:
+            results[key] = {
+                "status": "unverifiable",
+                "reason": "注册表未提供可核验来源链接",
+                "claimed": claimed_f,
+            }
+            continue
+        ok = [(u, c) for u, c in combined if c["status"] == "ok"]
+        mismatch = [(u, c) for u, c in combined if c["status"] == "mismatch"]
         if ok:
-            best = sorted(ok, key=lambda c: abs(c["value"] - float(claimed)))[0]
-            results[key] = {**best, "status": "ok", "source_url": next(u for u, c in combined if c is best or c["status"]=="ok")}
+            best_u, best = min(ok, key=lambda uc: abs(uc[1]["value"] - claimed_f))
+            results[key] = {**best, "status": "ok", "source_url": best_u}
         elif mismatch:
-            m = mismatch[0]
-            results[key] = {**m, "source_url": next((u for u, c in combined if c is m), model["source_url"])}
+            mismatch_u, mismatch_r = mismatch[0]
+            results[key] = {**mismatch_r, "source_url": mismatch_u or model.get("source_url")}
         else:
             best_u, best_r = max(combined, key=lambda uc: {"unverifiable": 2, "missing": 1, "ok": 0, "mismatch": 0}[uc[1]["status"]])
             results[key] = {**best_r, "source_url": best_u}
@@ -405,14 +434,13 @@ def main():
             print(f"ERROR: 未找到模型 {args.model}", file=sys.stderr)
             sys.exit(2)
     if args.company:
-        from model_taxonomy import company_aliases, resolve_company_key
+        from model_taxonomy import alias_matches, company_aliases, resolve_company_key
         key, _display = resolve_company_key(args.company)
         aliases = company_aliases(key) if key else []
         raw = str(args.company).strip().lower()
         all_models = [
             m for m in all_models
-            if (aliases and any(a in str(m.get("institution", "")).lower() for a in aliases))
-            or raw in str(m.get("institution", "")).lower()
+            if alias_matches(m.get("institution", ""), aliases or [raw])
         ]
         if not all_models:
             print(f"ERROR: 未找到公司/机构 {args.company} 对应的模型", file=sys.stderr)
@@ -464,6 +492,8 @@ def main():
         lines = [f"== 核验 {m['name']} ({m['institution']})"]
         res = verify_model(m, fresh=args.fresh)
         write_back(m, res)
+        counts = {"ok": 0, "mismatch": 0, "missing": 0, "unverifiable": 0}
+        local_pending = []
         line = []
         for key in REQUIRED_METRICS:
             r = res[key]
@@ -475,16 +505,16 @@ def main():
                 seg += f" [{reason}]"
             line.append(seg)
             if st != "ok":
-                pending.append({
+                local_pending.append({
                     "model": m["name"], "metric": REQUIRED_METRICS[key],
                     "claimed": r.get("claimed"), "status": st,
                     "source_url": r.get("source_url"),
                     "reason": r.get("reason") or r.get("evidence", "")[:120] or st,
                 })
-            summary[st if st in summary else "unverifiable"] += 1
+            counts[st if st in counts else "unverifiable"] += 1
         lines.append(" |".join(line))
         lines.append(f"  overall: {m.get('verification', {}).get('status')}")
-        return m["name"], res, lines
+        return m["name"], res, lines, counts, local_pending
 
     # 模型级并行（≤6 线程）：抓取慢/限流源时整体耗时 ≈ 最慢一批，而非全部之和
     done, total, done_names = 0, len(models), set()
@@ -493,13 +523,18 @@ def main():
         for fut in as_completed(futures):
             m = futures[fut]
             try:
-                name, res, lines = fut.result()
+                name, res, lines, counts, local_pending = fut.result()
             except Exception as e:
                 print(f"== 核验 {m['name']} 线程异常: {e}", file=sys.stderr)
                 name, res, lines = m["name"], {}, []
+                counts = {"ok": 0, "mismatch": 0, "missing": 0, "unverifiable": 1}
+                local_pending = []
             done += 1
             done_names.add(name)
             report["models"][name] = res
+            for key, value in counts.items():
+                summary[key] += value
+            pending.extend(local_pending)
             print("\n".join(lines))
             remaining = [x["name"] for x in models if x["name"] not in done_names]
             rem_txt = ", ".join(remaining[:8]) + (f" 等{len(remaining)}个" if len(remaining) > 8 else "")
@@ -509,25 +544,29 @@ def main():
 
     fallback_hits = 0
     if args.fallback:
-        if not models:
-            print("[cache] 全部模型复用本地核验结果，跳过后备源拉取（--fresh 强制重新核验+取后备值）。")
+        cached_unresolved = [
+            m for m in cached_skipped
+            if any((r.get("status") or "missing") != "ok"
+                   for r in ((m.get("verification") or {}).get("metrics") or {}).values())
+        ]
+        fallback_targets = models + cached_unresolved
+        if not fallback_targets:
+            print("[cache] 没有需要后备源补证的模型，跳过后备源拉取。")
         else:
             without = set(args.without.split(",")) if args.without else set()
-            _obs, fallback_hits, src_statuses, extra_pending = apply_fallback(models, without=without, fresh=args.fresh)
+            _obs, fallback_hits, src_statuses, extra_pending = apply_fallback(
+                fallback_targets, without=without, fresh=args.fresh)
             pending.extend(extra_pending)
             for st in src_statuses:
                 print(f"  [fallback:{st.get('status')}] {st.get('source')} {st.get('error', '')}")
     print(f"总耗时（含后备源）: {time.time() - t0:.1f}s")
 
-    with open(args.report, "w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
-    with open(args.pending, "w", encoding="utf-8") as f:
-        json.dump(pending, f, ensure_ascii=False, indent=2)
+    _atomic_json_dump(report, args.report)
+    _atomic_json_dump(pending, args.pending)
 
     modified = 0
     if not args.dry_run:
-        with open(args.registry, "w", encoding="utf-8") as f:
-            json.dump(registry, f, ensure_ascii=False, indent=2)
+        _atomic_json_dump(registry, args.registry)
         modified = len(models)
 
     print(f"\nSUMMARY: {json.dumps(summary, ensure_ascii=False)}")
